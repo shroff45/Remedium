@@ -2,6 +2,8 @@ package com.remedium.app
 
 import android.Manifest
 import android.app.AlertDialog
+import android.content.Context
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -28,11 +30,17 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import android.widget.EditText
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -43,24 +51,33 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusText: TextView
     private lateinit var captureButton: Button
     private lateinit var imageCapture: ImageCapture
-    private lateinit var resultPanel: androidx.constraintlayout.widget.ConstraintLayout
+    private lateinit var resultPanel: ConstraintLayout
     private lateinit var resultText: TextView
     private lateinit var scanAgainButton: Button
     private lateinit var languageToggleButton: Button
     private lateinit var speakButton: Button
     private lateinit var zoomButton: Button
+    private lateinit var askQuestionButton: Button
     private lateinit var medicineLookup: MedicineLookup
+    private var gemmaReasoner: GemmaReasoner? = null
+    private var gemmaReady = false
+    private var hasTier1A = false  // Track if current result has Tier 1A
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val ioScope = CoroutineScope(Dispatchers.IO)
 
     private lateinit var tts: TextToSpeech
     private var ttsReady = false
 
     private var currentLanguage = "en"
+    private lateinit var prefs: SharedPreferences
     private var lastOcrText: String = ""
     private var lastMedicines: List<MedicineInfo> = emptyList()
 
+    // ← NEW: store last Tier 2 results for language-toggle rebuild
+    private var lastTier2Results: List<Tier2Info> = emptyList()
+
     private var camera: androidx.camera.core.Camera? = null
-    private var currentZoom = 0f  // 0.0 = 1x, 0.3 = ~1.5x, 0.6 = ~2.5x
+    private var currentZoom = 0f
 
     private val CAMERA_PERMISSION_REQUEST = 100
 
@@ -68,17 +85,35 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        cameraPreview = findViewById(R.id.cameraPreview)
-        statusText = findViewById(R.id.statusText)
-        captureButton = findViewById(R.id.captureButton)
-        resultPanel = findViewById(R.id.resultPanel)
-        resultText = findViewById(R.id.resultText)
-        scanAgainButton = findViewById(R.id.scanAgainButton)
-        languageToggleButton = findViewById(R.id.languageToggleButton)
-        speakButton = findViewById(R.id.speakButton)
-        zoomButton = findViewById(R.id.zoomButton)
+        // Load persisted language preference
+        prefs = getSharedPreferences("remedium_prefs", Context.MODE_PRIVATE)
+        currentLanguage = prefs.getString("language", "en") ?: "en"
+
+        cameraPreview         = findViewById(R.id.cameraPreview)
+        statusText            = findViewById(R.id.statusText)
+        captureButton         = findViewById(R.id.captureButton)
+        resultPanel           = findViewById(R.id.resultPanel)
+        resultText            = findViewById(R.id.resultText)
+        scanAgainButton       = findViewById(R.id.scanAgainButton)
+        languageToggleButton  = findViewById(R.id.languageToggleButton)
+        speakButton           = findViewById(R.id.speakButton)
+        zoomButton            = findViewById(R.id.zoomButton)
+        askQuestionButton    = findViewById(R.id.askQuestionButton)
 
         medicineLookup = MedicineLookup(this)
+
+        // Initialize Gemma 4 reasoner
+        gemmaReasoner = GemmaReasoner(this)
+        gemmaReasoner!!.initAsync(
+            onReady = {
+                gemmaReady = true
+                Log.i("Remedium", "Gemma 4 ready for questions")
+            },
+            onError = { error ->
+                Log.w("Remedium", "Gemma 4 init failed: $error")
+                gemmaReady = false
+            }
+        )
 
         tts = TextToSpeech(this) { status ->
             if (status == TextToSpeech.SUCCESS) {
@@ -98,9 +133,14 @@ class MainActivity : AppCompatActivity() {
                 languageToggleButton.text = "EN"
             } else {
                 currentLanguage = "en"
-                languageToggleButton.text = "हिं"
+                languageToggleButton.text = "\u0939\u093F\u0902"
             }
+            prefs.edit().putString("language", currentLanguage).apply()
             setTtsLanguage()
+            // Update ask question button text if visible
+            if (askQuestionButton.visibility == View.VISIBLE) {
+                askQuestionButton.text = if (currentLanguage == "hi") "\u092A\u094D\u0930\u0936\u094D\u0928 \u092A\u0942\u091B\u0947\u0902" else "Ask a question"
+            }
             if (resultPanel.visibility == View.VISIBLE) {
                 rebuildCurrentResult()
             }
@@ -115,6 +155,18 @@ class MainActivity : AppCompatActivity() {
             tts.speak(textToSpeak, TextToSpeech.QUEUE_FLUSH, null, "remedium_tts")
         }
 
+        askQuestionButton.setOnClickListener {
+            if (!gemmaReady) {
+                statusText.text = "Gemma 4 not ready. Please wait..."
+                return@setOnClickListener
+            }
+            if (lastMedicines.isEmpty()) {
+                statusText.text = "No verified medicine to ask about."
+                return@setOnClickListener
+            }
+            showQuestionDialog()
+        }
+
         zoomButton.setOnClickListener {
             currentZoom = when {
                 currentZoom < 0.3f -> 0.3f
@@ -122,19 +174,15 @@ class MainActivity : AppCompatActivity() {
                 else -> 0f
             }
             val label = when (currentZoom) {
-                0f -> "1x"
-                0.3f -> "1.5x"
-                else -> "2.5x"
+                0f    -> "1x"
+                0.3f  -> "1.5x"
+                else  -> "2.5x"
             }
             zoomButton.text = label
             camera?.cameraControl?.setLinearZoom(currentZoom)
         }
 
-        if (hasCameraPermission()) {
-            startCamera()
-        } else {
-            requestCameraPermission()
-        }
+        if (hasCameraPermission()) startCamera() else requestCameraPermission()
     }
 
     private fun setTtsLanguage() {
@@ -143,8 +191,7 @@ class MainActivity : AppCompatActivity() {
             val locale = if (currentLanguage == "hi") Locale("hi", "IN") else Locale.ENGLISH
             val result = tts.setLanguage(locale)
             if (result == TextToSpeech.LANG_MISSING_DATA ||
-                result == TextToSpeech.LANG_NOT_SUPPORTED
-            ) {
+                result == TextToSpeech.LANG_NOT_SUPPORTED) {
                 Log.w("Remedium", "TTS locale not supported: $locale")
             }
         } catch (e: Exception) {
@@ -152,11 +199,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun hasCameraPermission(): Boolean {
-        return ContextCompat.checkSelfPermission(
-            this, Manifest.permission.CAMERA
-        ) == PackageManager.PERMISSION_GRANTED
-    }
+    private fun hasCameraPermission() =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+                PackageManager.PERMISSION_GRANTED
 
     private fun requestCameraPermission() {
         ActivityCompat.requestPermissions(
@@ -170,8 +215,7 @@ class MainActivity : AppCompatActivity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == CAMERA_PERMISSION_REQUEST) {
             if (grantResults.isNotEmpty() &&
-                grantResults[0] == PackageManager.PERMISSION_GRANTED
-            ) {
+                grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                 startCamera()
             } else {
                 statusText.text = "Camera permission denied"
@@ -191,19 +235,16 @@ class MainActivity : AppCompatActivity() {
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
                 .setTargetRotation(cameraPreview.display.rotation)
                 .build()
-            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
             try {
                 cameraProvider.unbindAll()
                 camera = cameraProvider.bindToLifecycle(
-                    this, cameraSelector, preview, imageCapture
+                    this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture
                 )
-
-                // Tap-to-focus on preview
                 cameraPreview.setOnTouchListener { _, event ->
                     if (event.action == android.view.MotionEvent.ACTION_UP) {
                         val factory = cameraPreview.meteringPointFactory
-                        val point = factory.createPoint(event.x, event.y)
-                        val action = androidx.camera.core.FocusMeteringAction.Builder(
+                        val point   = factory.createPoint(event.x, event.y)
+                        val action  = androidx.camera.core.FocusMeteringAction.Builder(
                             point, androidx.camera.core.FocusMeteringAction.FLAG_AF
                         ).setAutoCancelDuration(3, java.util.concurrent.TimeUnit.SECONDS).build()
                         camera?.cameraControl?.startFocusAndMetering(action)
@@ -211,8 +252,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     true
                 }
-
-                statusText.text = "Tap to focus → Use 1x/1.5x/2.5x for small strips → Scan."
+                statusText.text = "Tap to focus \u2192 Use 1x/1.5x/2.5x for small strips \u2192 Scan."
             } catch (e: Exception) {
                 statusText.text = "Camera failed: ${e.message}"
             }
@@ -222,20 +262,14 @@ class MainActivity : AppCompatActivity() {
     private fun takePhoto() {
         statusText.text = "Focusing..."
         captureButton.isEnabled = false
-
-        // Step 1: Force autofocus at center of preview
-        val factory = cameraPreview.meteringPointFactory
+        val factory     = cameraPreview.meteringPointFactory
         val centerPoint = factory.createPoint(
-            cameraPreview.width / 2f,
-            cameraPreview.height / 2f
+            cameraPreview.width / 2f, cameraPreview.height / 2f
         )
         val focusAction = androidx.camera.core.FocusMeteringAction.Builder(
             centerPoint, androidx.camera.core.FocusMeteringAction.FLAG_AF
         ).disableAutoCancel().build()
-
         val focusFuture = camera?.cameraControl?.startFocusAndMetering(focusAction)
-
-        // Step 2: After focus completes, take the picture
         if (focusFuture != null) {
             focusFuture.addListener({
                 runOnUiThread { statusText.text = "Capturing..." }
@@ -268,46 +302,45 @@ class MainActivity : AppCompatActivity() {
 
     private fun imageProxyToBitmap(image: ImageProxy): Bitmap {
         val buffer = image.planes[0].buffer
-        val bytes = ByteArray(buffer.remaining())
+        val bytes  = ByteArray(buffer.remaining())
         buffer.get(bytes)
-
-        // Decode with downscale to save memory
-        val opts = BitmapFactory.Options().apply {
-            inJustDecodeBounds = true
-        }
+        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
-
-        // Larger target for small-strip detail (memory still safe with RGB_565)
         val maxSide = 3200
-        var sample = 1
+        var sample  = 1
         val longest = maxOf(opts.outWidth, opts.outHeight)
         while (longest / sample > maxSide) sample *= 2
-
         val decodeOpts = BitmapFactory.Options().apply {
-            inSampleSize = sample
+            inSampleSize     = sample
             inPreferredConfig = Bitmap.Config.RGB_565
         }
-        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOpts)
-
-        val matrix = Matrix()
-        matrix.postRotate(image.imageInfo.rotationDegrees.toFloat())
-        val rotated = Bitmap.createBitmap(
-            bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true
-        )
-        if (rotated != bitmap) bitmap.recycle()
-        return rotated
+        var bitmap: Bitmap? = null
+        var rotated: Bitmap? = null
+        try {
+            bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOpts)
+            val matrix = Matrix()
+            matrix.postRotate(image.imageInfo.rotationDegrees.toFloat())
+            rotated = Bitmap.createBitmap(bitmap!!, 0, 0, bitmap.width, bitmap.height, matrix, true)
+            return rotated
+        } finally {
+            // Always recycle original bitmap, regardless of rotation success/failure
+            if (rotated != bitmap && bitmap != null && !bitmap.isRecycled) {
+                bitmap.recycle()
+            }
+        }
     }
 
     private fun runOCR(bitmap: Bitmap) {
-        val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-        val inputImage = InputImage.fromBitmap(bitmap, 0)
+        val recognizer  = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+        val inputImage  = InputImage.fromBitmap(bitmap, 0)
         recognizer.process(inputImage)
             .addOnSuccessListener { visionText ->
                 val extractedText = visionText.text
                 Log.i("RemediumOCR", "RAW OCR TEXT:\n$extractedText\n--END--")
                 runOnUiThread {
                     if (extractedText.isBlank()) {
-                        statusText.text = "No text detected. Try better lighting or move closer."
+                        statusText.text =
+                            "No text detected. Try better lighting or move closer."
                         captureButton.isEnabled = true
                     } else {
                         showResultPanel(extractedText)
@@ -327,24 +360,43 @@ class MainActivity : AppCompatActivity() {
             }
     }
 
+    // ─────────────────────────────────────────────────────────
+    // RESULT PANEL  ← CHANGED: uses SearchResult, stores Tier 2
+    // ─────────────────────────────────────────────────────────
+
     private fun showResultPanel(text: String) {
-        val medicines = medicineLookup.searchMedicines(text)
-        lastOcrText = text
-        lastMedicines = medicines
+        // Run database search on IO thread to prevent ANR
+        ioScope.launch {
+            val searchResult = medicineLookup.searchWithAmbiguity(text)
 
-        val display = buildDisplayText(text, medicines)
-        resultText.text = display
-        resultPanel.visibility = View.VISIBLE
-        statusText.text = "Camera ready. Tap Scan."
-        captureButton.isEnabled = true
+            withContext(Dispatchers.Main) {
+                lastOcrText        = text
+                lastMedicines      = searchResult.confirmed
+                lastTier2Results   = searchResult.tier2Results
+                hasTier1A          = searchResult.confirmed.isNotEmpty()
 
-        if (medicines.any { it.legalSchedule == "Schedule H1" }) {
-            showScheduleH1Dialog()
+                // Show/hide "Ask a question" button based on Tier 1A presence
+                askQuestionButton.visibility = if (hasTier1A) View.VISIBLE else View.GONE
+                if (hasTier1A) {
+                    askQuestionButton.text = if (currentLanguage == "hi") "प्रश्न पूछें" else "Ask a question"
+                }
+
+                val display = buildDisplayText(text, searchResult.confirmed, searchResult.tier2Results)
+                resultText.text    = display
+                resultPanel.visibility = View.VISIBLE
+                statusText.text    = "Camera ready. Tap Scan."
+                captureButton.isEnabled = true
+
+                if (searchResult.confirmed.any {
+                        it.legalSchedule?.uppercase()?.contains("H1") == true }) {
+                    showScheduleH1Dialog()
+                }
+            }
         }
     }
 
     private fun rebuildCurrentResult() {
-        val display = buildDisplayText(lastOcrText, lastMedicines)
+        val display = buildDisplayText(lastOcrText, lastMedicines, lastTier2Results)
         resultText.text = display
     }
 
@@ -354,66 +406,143 @@ class MainActivity : AppCompatActivity() {
         if (::tts.isInitialized) tts.stop()
     }
 
-    private fun showScheduleH1Dialog() {
-        val title: String
-        val message: String
-        val positive: String
-        val negative: String
+    // ─────────────────────────────────────────────────────────
+    // ASK QUESTION (Gemma 4)  ← NEW (Task 5)
+    // ─────────────────────────────────────────────────────────
 
+    private fun showQuestionDialog() {
+        val med = lastMedicines.firstOrNull() ?: return
+        val medName = med.genericName ?: "medicine"
+        val title = if (currentLanguage == "hi")
+            "$medName के बारे में पूछें"
+        else
+            "Ask about $medName"
+        val hint = if (currentLanguage == "hi") "आपका प्रश्न..." else "Your question..."
+        val submit = if (currentLanguage == "hi") "भेजें" else "Ask"
+
+        val editText = EditText(this).apply {
+            setHint(hint)
+            setPadding(48, 32, 48, 32)
+            textSize = 16f
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(editText)
+            .setPositiveButton(submit) { _, _ ->
+                val question = editText.text.toString().trim()
+                if (question.isNotEmpty()) {
+                    runGemmaQuery(med, question)
+                }
+            }
+            .setNegativeButton(if (currentLanguage == "hi") "रद्द करें" else "Cancel", null)
+            .show()
+    }
+
+    private fun runGemmaQuery(med: MedicineInfo, question: String) {
+        statusText.text = if (currentLanguage == "hi")
+            "Gemma 4 सोच रहा है..." else "Gemma 4 is reasoning..."
+        askQuestionButton.isEnabled = false
+        resultText.text = ""
+
+        val prompt = ContextAssembler.buildGroundedPrompt(
+            medicines = listOf(med),
+            userQuestion = question,
+            isPregnant = false,
+            ageGroup = "adult"
+        )
+
+        val responseBuilder = StringBuilder()
+
+        gemmaReasoner?.reason(
+            prompt = prompt,
+            onToken = { token ->
+                responseBuilder.append(token)
+                runOnUiThread {
+                    resultText.text = responseBuilder.toString()
+                }
+            },
+            onDone = {
+                runOnUiThread {
+                    val fullResponse = responseBuilder.toString()
+                    statusText.text = if (currentLanguage == "hi")
+                        "पूर्ण" else "Done"
+
+                    // Read response aloud via TTS
+                    if (ttsReady && fullResponse.isNotBlank()) {
+                        tts.speak(fullResponse, TextToSpeech.QUEUE_FLUSH, null, "gemma_response")
+                    }
+
+                    askQuestionButton.isEnabled = true
+                }
+            },
+            onTimeout = {
+                runOnUiThread {
+                    val timeoutMsg = if (currentLanguage == "hi")
+                        "समय समाप्त। कृपया पुनः प्रयास करें।" else "Timed out. Please try again."
+                    statusText.text = timeoutMsg
+                    resultText.text = timeoutMsg
+                    askQuestionButton.isEnabled = true
+                }
+            }
+        )
+    }
+
+    private fun showScheduleH1Dialog() {
+        val title: String; val message: String
+        val positive: String; val negative: String
         if (currentLanguage == "hi") {
-            title = "पर्चा आवश्यक है"
-            message = "यह Schedule H1 दवा है — एक उच्च-प्रभावशाली एंटीबायोटिक। " +
-                    "भारतीय कानून के अनुसार केमिस्ट को दवा देने से पहले आपका विवरण दर्ज करना होगा। " +
-                    "क्या यह दवा डॉक्टर ने आपको लिखी है?"
-            positive = "हाँ, मेरे पास पर्चा है"
-            negative = "नहीं"
+            title    = "\u092A\u0930\u094D\u091A\u093E \u0906\u0935\u0936\u094D\u092F\u0915 \u0939\u0948"
+            message  = "\u092F\u0939 Schedule H1 \u0926\u0935\u093E \u0939\u0948 \u2014 \u090F\u0915 \u0909\u091A\u094D\u091A-\u092A\u094D\u0930\u092D\u093E\u0935\u0936\u093E\u0932\u0940 \u090F\u0902\u091F\u0940\u092C\u093E\u092F\u0949\u091F\u093F\u0915\u0964 " +
+                    "\u092D\u093E\u0930\u0924\u0940\u092F \u0915\u093E\u0928\u0942\u0928 \u0915\u0947 \u0905\u0928\u0941\u0938\u093E\u0930 \u0915\u0947\u092E\u093F\u0938\u094D\u091F \u0915\u094B \u0926\u0935\u093E \u0926\u0947\u0928\u0947 \u0938\u0947 \u092A\u0939\u0932\u0947 \u0906\u092A\u0915\u093E \u0935\u093F\u0935\u0930\u0923 \u0926\u0930\u094D\u091C \u0915\u0930\u0928\u093E \u0939\u094B\u0917\u093E\u0964 " +
+                    "\u0915\u094D\u092F\u093E \u092F\u0939 \u0926\u0935\u093E \u0921\u0949\u0915\u094D\u091F\u0930 \u0928\u0947 \u0906\u092A\u0915\u094B \u0932\u093F\u0916\u0940 \u0939\u0948?"
+            positive = "\u0939\u093E\u0901, \u092E\u0947\u0930\u0947 \u092A\u093E\u0938 \u092A\u0930\u094D\u091A\u093E \u0939\u0948"
+            negative = "\u0928\u0939\u0940\u0902"
         } else {
-            title = "Prescription Required"
-            message = "This is a Schedule H1 medicine — a high-potency antibiotic. " +
+            title    = "Prescription Required"
+            message  = "This is a Schedule H1 medicine \u2014 a high-potency antibiotic. " +
                     "Under Indian law, the chemist must record your details before dispensing. " +
                     "Have you been prescribed this by a doctor?"
             positive = "Yes, I have a prescription"
             negative = "No"
         }
-
         AlertDialog.Builder(this)
-            .setTitle(title)
-            .setMessage(message)
+            .setTitle(title).setMessage(message)
             .setPositiveButton(positive) { d, _ -> d.dismiss() }
-            .setNegativeButton(negative) { d, _ -> d.dismiss() }
-            .setCancelable(false)
-            .show()
+            .setNegativeButton(negative)  { d, _ -> d.dismiss() }
+            .setCancelable(false).show()
     }
 
-    // ============================================================
-    // DISPLAY BUILDER
-    // ============================================================
+    // ─────────────────────────────────────────────────────────
+    // DISPLAY BUILDER  ← CHANGED: accepts tier2Results param
+    // ─────────────────────────────────────────────────────────
 
     private fun buildDisplayText(
         rawText: String,
-        medicines: List<MedicineInfo>
+        medicines: List<MedicineInfo>,
+        tier2Results: List<Tier2Info> = emptyList()   // ← NEW param
     ): CharSequence {
         val sb = SpannableStringBuilder()
 
-        if (medicines.isEmpty()) {
+        // ── Case 1: No results at all ─────────────────────────
+        if (medicines.isEmpty() && tier2Results.isEmpty()) {
+            appendTierBadge(sb, ResultTier.NOT_FOUND)   // ← NEW: grey badge
+            sb.append("\n\n")
             if (currentLanguage == "hi") {
-                appendBold(sb, "इस छवि में कोई ज्ञात दवा नहीं मिली\n\n")
-                sb.append("हम किसी भी दवा को अपने डेटाबेस से मिला नहीं सके।\n\n")
-                appendBold(sb, "निकाला गया टेक्स्ट:\n")
-                sb.append(rawText)
-                sb.append("\n\n")
+                appendBold(sb, "\u0907\u0938 \u091B\u0935\u093F \u092E\u0947\u0902 \u0915\u094B\u0908 \u091C\u094D\u091E\u093E\u0924 \u0926\u0935\u093E \u0928\u0939\u0940\u0902 \u092E\u093F\u0932\u0940\n\n")
+                sb.append("\u0939\u092E \u0915\u093F\u0938\u0940 \u092D\u0940 \u0926\u0935\u093E \u0915\u094B \u0905\u092A\u0928\u0947 \u0921\u0947\u091F\u093E\u092C\u0947\u0938 \u0938\u0947 \u092E\u093F\u0932\u093E \u0928\u0939\u0940\u0902 \u0938\u0915\u0947\u0964\n\n")
+                appendBold(sb, "\u0928\u093F\u0915\u093E\u0932\u093E \u0917\u092F\u093E \u091F\u0947\u0915\u094D\u0938\u094D\u091F:\n")
+                sb.append(rawText).append("\n\n")
                 appendItalicGrey(
                     sb,
-                    "अस्वीकरण: यह जानकारी केवल शैक्षिक उद्देश्यों के लिए है। " +
-                            "किसी भी दवा का सेवन करने से पहले डॉक्टर से परामर्श जरूर लें। " +
-                            "स्व-चिकित्सा जोखिम भरा हो सकता है।"
+                    "\u0905\u0938\u094D\u0935\u0940\u0915\u0930\u0923: \u092F\u0939 \u091C\u093E\u0928\u0915\u093E\u0930\u0940 \u0915\u0947\u0935\u0932 \u0936\u0948\u0915\u094D\u0937\u093F\u0915 \u0909\u0926\u094D\u0926\u0947\u0936\u094D\u092F\u094B\u0902 \u0915\u0947 \u0932\u093F\u090F \u0939\u0948\u0964 " +
+                            "\u0915\u093F\u0938\u0940 \u092D\u0940 \u0926\u0935\u093E \u0915\u093E \u0938\u0947\u0935\u0928 \u0915\u0930\u0928\u0947 \u0938\u0947 \u092A\u0939\u0932\u0947 \u0921\u0949\u0915\u094D\u091F\u0930 \u0938\u0947 \u092A\u0930\u093E\u092E\u0930\u094D\u0936 \u091C\u0930\u0942\u0930 \u0932\u0947\u0902\u0964"
                 )
             } else {
                 appendBold(sb, "No known medicines found in this image\n\n")
                 sb.append("We could not match any text to our medicine database.\n\n")
                 appendBold(sb, "Extracted Text:\n")
-                sb.append(rawText)
-                sb.append("\n\n")
+                sb.append(rawText).append("\n\n")
                 appendItalicGrey(
                     sb,
                     "Disclaimer: This information is for educational purposes only. " +
@@ -424,30 +553,45 @@ class MainActivity : AppCompatActivity() {
             return sb
         }
 
+        // ── Case 2: Tier 1A results ───────────────────────────
         for ((index, med) in medicines.withIndex()) {
-            if (index > 0) sb.append("\n\n────────────────\n\n")
+            if (index > 0) sb.append("\n\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n")
             appendMedicineBlock(sb, med)
         }
+
+        // ── Case 3: Tier 2 results (appended after Tier 1A) ← NEW
+        for ((index, t2) in tier2Results.withIndex()) {
+            if (medicines.isNotEmpty() || index > 0) sb.append("\n\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n")
+            appendTier2Block(sb, t2)
+        }
+
         return sb
     }
+
+    // ─────────────────────────────────────────────────────────
+    // TIER 1A BLOCK  ← CHANGED: badge added at top, alternatives at bottom
+    // ─────────────────────────────────────────────────────────
 
     private fun appendMedicineBlock(sb: SpannableStringBuilder, med: MedicineInfo) {
         val template = med.category?.let { medicineLookup.getTemplate(currentLanguage, it) }
 
+        // ── Tier badge ← NEW ──────────────────────────────────
+        appendTierBadge(sb, ResultTier.TIER_1A)
+        sb.append("\n\n")
+
+        // ── Critical warnings (before header, unchanged) ──────
         if (med.criticalWarnings.isNotEmpty()) {
             val critStart = sb.length
             appendColored(
                 sb,
-                if (currentLanguage == "hi") "⚠ अत्यंत महत्वपूर्ण:\n" else "⚠ CRITICAL:\n",
+                if (currentLanguage == "hi") "\u26A0 \u0905\u0924\u094D\u092F\u0902\u0924 \u092E\u0939\u0924\u094D\u0935\u092A\u0942\u0930\u094D\u0923:\n" else "\u26A0 CRITICAL:\n",
                 "#B71C1C"
             )
             for (w in med.criticalWarnings) {
-                sb.append("• ")
-                sb.append(pickLang(w.textEn, w.textHi))
-                sb.append("\n")
+                sb.append("\u2022 ").append(pickLang(w.textEn, w.textHi)).append("\n")
             }
             val tail = if (currentLanguage == "hi")
-                "संदेह हो तो न लें। तुरंत डॉक्टर से मिलें।\n"
+                "\u0938\u0902\u0926\u0947\u0939 \u0939\u094B \u0924\u094B \u0928 \u0932\u0947\u0902\u0964 \u0924\u0941\u0930\u0902\u0924 \u0921\u0949\u0915\u094D\u091F\u0930 \u0938\u0947 \u092E\u093F\u0932\u0947\u0902\u0964\n"
             else
                 "If in doubt, do not take. Consult a doctor immediately.\n"
             appendColored(sb, tail, "#B71C1C")
@@ -459,131 +603,111 @@ class MainActivity : AppCompatActivity() {
             sb.append("\n")
         }
 
+        // ── Header & core fields (unchanged) ──────────────────
         appendHeader(sb, med.brandName ?: med.genericName)
         sb.append("\n")
         if (med.brandName != null) {
-            val label = if (currentLanguage == "hi") "जेनेरिक नाम: " else "Generic name: "
+            val label = if (currentLanguage == "hi") "\u091C\u0947\u0928\u0947\u0930\u093F\u0915 \u0928\u093E\u092E: " else "Generic name: "
             appendBold(sb, label)
-            sb.append(med.genericName)
-            sb.append("\n")
+            sb.append(med.genericName).append("\n")
         }
-
         if (!med.drugClass.isNullOrBlank()) {
-            val label = if (currentLanguage == "hi") "प्रकार: " else "Type: "
+            val label = if (currentLanguage == "hi") "\u092A\u094D\u0930\u0915\u093E\u0930: " else "Type: "
             appendBold(sb, label)
-            sb.append(med.drugClass)
-            sb.append("\n")
+            sb.append(med.drugClass).append("\n")
         }
-
         if (!med.legalSchedule.isNullOrBlank() && med.legalSchedule != "OTC") {
             sb.append("\n")
             val raw = template?.scheduleLabel
                 ?: if (currentLanguage == "hi")
-                    "Schedule {SCHEDULE}: भारतीय कानून के अनुसार वैध पर्चा आवश्यक है।"
+                    "Schedule {SCHEDULE}: \u092D\u093E\u0930\u0924\u0940\u092F \u0915\u093E\u0928\u0942\u0928 \u0915\u0947 \u0905\u0928\u0941\u0938\u093E\u0930 \u0935\u0948\u0927 \u092A\u0930\u094D\u091A\u093E \u0906\u0935\u0936\u094D\u092F\u0915 \u0939\u0948\u0964"
                 else
                     "Schedule {SCHEDULE}: Prescription required under Indian law."
-            val text = raw.replace("{SCHEDULE}", med.legalSchedule)
-            val color = if (med.legalSchedule == "Schedule H1") "#E65100" else "#1565C0"
+            val text  = raw.replace("{SCHEDULE}", med.legalSchedule)
+            val color = if (med.legalSchedule.uppercase().contains("H1")) "#E65100" else "#1565C0"
             appendColored(sb, text, color)
             sb.append("\n")
         }
-
         if (!med.uses.isNullOrBlank()) {
             sb.append("\n")
-            val label = if (currentLanguage == "hi") "किस काम आती है:\n" else "What it is for:\n"
+            val label = if (currentLanguage == "hi") "\u0915\u093F\u0938 \u0915\u093E\u092E \u0906\u0924\u0940 \u0939\u0948:\n" else "What it is for:\n"
             appendBold(sb, label)
-            sb.append(med.uses)
-            sb.append("\n")
+            sb.append(med.uses).append("\n")
         }
-
         if (!med.dose.isNullOrBlank()) {
             sb.append("\n")
-            val raw = template?.doseLabel
-                ?: if (currentLanguage == "hi") "सामान्य खुराक: {DOSE}" else "Usual adult dose: {DOSE}"
+            val raw  = template?.doseLabel
+                ?: if (currentLanguage == "hi") "\u0938\u093E\u092E\u093E\u0928\u094D\u092F \u0916\u0941\u0930\u093E\u0915: {DOSE}" else "Usual adult dose: {DOSE}"
             val text = raw.replace("{DOSE}", med.dose)
             appendBold(sb, text)
             sb.append("\n")
         }
-
         val timing = if (currentLanguage == "hi" && !med.timingNoteHi.isNullOrBlank())
             med.timingNoteHi else med.timingNote
         if (!timing.isNullOrBlank()) {
             sb.append("\n")
-            val label = if (currentLanguage == "hi") "कब लें: " else "When to take: "
+            val label = if (currentLanguage == "hi") "\u0915\u092C \u0932\u0947\u0902: " else "When to take: "
             appendBold(sb, label)
-            sb.append(timing)
-            sb.append("\n")
+            sb.append(timing).append("\n")
         }
-
         if (med.alcoholWarning) {
             sb.append("\n")
             val text = template?.alcoholLabel
-                ?: if (currentLanguage == "hi")
-                    "🚫 शराब के साथ न लें।"
-                else
-                    "🚫 Do not take with alcohol."
-            val finalText = if (text.startsWith("🚫")) text else "🚫 $text"
-            appendColored(sb, finalText, "#E65100")
+                ?: if (currentLanguage == "hi") "\uD83D\uDEAB \u0936\u0930\u093E\u092C \u0915\u0947 \u0938\u093E\u0925 \u0928 \u0932\u0947\u0902\u0964" else "\uD83D\uDEAB Do not take with alcohol."
+            appendColored(sb, if (text.startsWith("\uD83D\uDEAB")) text else "\uD83D\uDEAB $text", "#E65100")
             sb.append("\n")
         }
-
         if (!med.fdaPregnancyCat.isNullOrBlank()) {
             sb.append("\n")
-            val cat = med.fdaPregnancyCat.trim().uppercase()
+            val cat     = med.fdaPregnancyCat.trim().uppercase()
             val meaning = pregnancyMeaning(cat, currentLanguage)
-            val label = if (currentLanguage == "hi") "गर्भावस्था श्रेणी: " else "Pregnancy Category: "
-            val full = "$label$cat — $meaning"
+            val label   = if (currentLanguage == "hi") "\u0917\u0930\u094D\u092D\u093E\u0935\u0938\u094D\u0925\u093E \u0936\u094D\u0930\u0947\u0923\u0940: " else "Pregnancy Category: "
+            val full    = "$label$cat \u2014 $meaning"
             when (cat) {
-                "X" -> appendColored(sb, full, "#B71C1C")
-                "D" -> appendColored(sb, full, "#E65100")
+                "X"  -> appendColored(sb, full, "#B71C1C")
+                "D"  -> appendColored(sb, full, "#E65100")
                 else -> appendBold(sb, full)
             }
             sb.append("\n")
         }
-
         if (!med.sideEffects.isNullOrBlank()) {
             sb.append("\n")
-            val label = if (currentLanguage == "hi") "सामान्य दुष्प्रभाव:\n" else "Common side effects:\n"
+            val label = if (currentLanguage == "hi") "\u0938\u093E\u092E\u093E\u0928\u094D\u092F \u0926\u0941\u0937\u094D\u092A\u094D\u0930\u092D\u093E\u0935:\n" else "Common side effects:\n"
             appendBold(sb, label)
-            sb.append(med.sideEffects)
-            sb.append("\n")
+            sb.append(med.sideEffects).append("\n")
         }
-
         if (med.highWarnings.isNotEmpty()) {
             sb.append("\n")
-            val label = if (currentLanguage == "hi") "महत्वपूर्ण:\n" else "Important:\n"
+            val label = if (currentLanguage == "hi") "\u092E\u0939\u0924\u094D\u0935\u092A\u0942\u0930\u094D\u0923:\n" else "Important:\n"
             appendColored(sb, label, "#E65100")
             for (w in med.highWarnings) {
-                sb.append("• ")
-                sb.append(pickLang(w.textEn, w.textHi))
-                sb.append("\n")
+                sb.append("\u2022 ").append(pickLang(w.textEn, w.textHi)).append("\n")
             }
         }
-
         if (med.mediumWarnings.isNotEmpty()) {
             sb.append("\n")
-            val label = if (currentLanguage == "hi") "ध्यान दें:\n" else "Note:\n"
+            val label = if (currentLanguage == "hi") "\u0927\u094D\u092F\u093E\u0928 \u0926\u0947\u0902:\n" else "Note:\n"
             appendColored(sb, label, "#424242")
             for (w in med.mediumWarnings) {
-                sb.append("• ")
-                sb.append(pickLang(w.textEn, w.textHi))
-                sb.append("\n")
+                sb.append("\u2022 ").append(pickLang(w.textEn, w.textHi)).append("\n")
             }
         }
-
         if (!med.contraindications.isNullOrBlank()) {
             sb.append("\n")
-            val label = if (currentLanguage == "hi") "इन्हें न लें अगर:\n" else "Do NOT take if:\n"
+            val label = if (currentLanguage == "hi") "\u0907\u0928\u094D\u0939\u0947\u0902 \u0928 \u0932\u0947\u0902 \u0905\u0917\u0930:\n" else "Do NOT take if:\n"
             appendBold(sb, label)
-            sb.append(med.contraindications)
-            sb.append("\n")
+            sb.append(med.contraindications).append("\n")
         }
 
+        // ── Alternative brands ← NEW (Part 3) ────────────────
+        appendAlternativesBlock(sb, med)
+
+        // ── Disclaimer (unchanged position) ──────────────────
         sb.append("\n")
         val disclaimer = if (currentLanguage == "hi")
-            "अस्वीकरण: यह जानकारी केवल शैक्षिक उद्देश्यों के लिए है। " +
-                    "किसी भी दवा का सेवन करने से पहले डॉक्टर से परामर्श जरूर लें। " +
-                    "स्व-चिकित्सा जोखिम भरा हो सकता है।"
+            "\u0905\u0938\u094D\u0935\u0940\u0915\u0930\u0923: \u092F\u0939 \u091C\u093E\u0928\u0915\u093E\u0930\u0940 \u0915\u0947\u0935\u0932 \u0936\u0948\u0915\u094D\u0937\u093F\u0915 \u0909\u0926\u094D\u0926\u0947\u0936\u094D\u092F\u094B\u0902 \u0915\u0947 \u0932\u093F\u090F \u0939\u0948\u0964 " +
+                    "\u0915\u093F\u0938\u0940 \u092D\u0940 \u0926\u0935\u093E \u0915\u093E \u0938\u0947\u0935\u0928 \u0915\u0930\u0928\u0947 \u0938\u0947 \u092A\u0939\u0932\u0947 \u0921\u0949\u0915\u094D\u091F\u0930 \u0938\u0947 \u092A\u0930\u093E\u092E\u0930\u094D\u0936 \u091C\u0930\u0942\u0930 \u0932\u0947\u0902\u0964 " +
+                    "\u0938\u094D\u0935-\u091A\u093F\u0915\u093F\u0924\u094D\u0938\u093E \u091C\u094B\u0916\u093F\u092E \u092D\u0930\u093E \u0939\u094B \u0938\u0915\u0924\u093E \u0939\u0948\u0964"
         else
             "Disclaimer: This information is for educational purposes only. " +
                     "Always consult a doctor before taking any medicine. " +
@@ -591,93 +715,199 @@ class MainActivity : AppCompatActivity() {
         appendItalicGrey(sb, disclaimer)
     }
 
-    private fun pickLang(en: String, hi: String?): String {
-        return if (currentLanguage == "hi" && !hi.isNullOrBlank()) hi else en
-    }
+    // ─────────────────────────────────────────────────────────
+    // TIER 2 BLOCK  ← NEW (Part 2)
+    // Shows brand info only. No dose, no clinical fields.
+    // ─────────────────────────────────────────────────────────
 
-    private fun pregnancyMeaning(cat: String, lang: String): String {
-        return if (lang == "hi") {
-            when (cat) {
-                "A" -> "सामान्य खुराक पर सुरक्षित"
-                "B" -> "कोई ज्ञात खतरा नहीं"
-                "C" -> "केवल जरूरत पर डॉक्टर की सलाह से"
-                "D" -> "बच्चे को खतरा, केवल आवश्यक होने पर"
-                "X" -> "गर्भावस्था में बिल्कुल न लें"
-                else -> "जानकारी अनुपलब्ध"
-            }
-        } else {
-            when (cat) {
-                "A" -> "Safe at normal doses"
-                "B" -> "No known risk"
-                "C" -> "Use only if benefit outweighs risk"
-                "D" -> "Known risk to baby, use only if essential"
-                "X" -> "Do NOT use in pregnancy"
-                else -> "Information not available"
-            }
+    private fun appendTier2Block(sb: SpannableStringBuilder, t2: Tier2Info) {
+        appendTierBadge(sb, ResultTier.TIER_2)
+        sb.append("\n\n")
+
+        appendHeader(sb, t2.brandName)
+        sb.append("\n")
+
+        if (!t2.saltComposition.isNullOrBlank()) {
+            val label = if (currentLanguage == "hi") "\u0938\u093E\u0932\u094D\u091F: " else "Salt composition: "
+            appendBold(sb, label)
+            sb.append(t2.saltComposition).append("\n")
         }
+        if (!t2.manufacturer.isNullOrBlank()) {
+            val label = if (currentLanguage == "hi") "\u0928\u093F\u0930\u094D\u092E\u093E\u0924\u093E: " else "Manufacturer: "
+            appendBold(sb, label)
+            sb.append(t2.manufacturer).append("\n")
+        }
+        if (!t2.mrp.isNullOrBlank()) {
+            val label = if (currentLanguage == "hi") "MRP: \u20B9" else "MRP: \u20B9"
+            appendBold(sb, label)
+            sb.append(t2.mrp).append("\n")
+        }
+        if (!t2.subCategory.isNullOrBlank()) {
+            val label = if (currentLanguage == "hi") "\u0936\u094D\u0930\u0947\u0923\u0940: " else "Category: "
+            appendBold(sb, label)
+            sb.append(t2.subCategory).append("\n")
+        }
+
+        // Tier 2 disclaimer
+        sb.append("\n")
+        val t2disclaimer = if (currentLanguage == "hi")
+            "\u2139 \u092F\u0939 \u092C\u094D\u0930\u093E\u0902\u0921 \u0939\u092E\u093E\u0930\u0947 \u092A\u0939\u091A\u093E\u0928 \u0921\u0947\u091F\u093E\u092C\u0947\u0938 \u092E\u0947\u0902 \u0939\u0948 \u0932\u0947\u0915\u093F\u0928 \u0939\u092E\u093E\u0930\u0947 \u0938\u0924\u094D\u092F\u093E\u092A\u093F\u0924 \u0915\u094D\u0932\u093F\u0928\u093F\u0915\u0932 \u0921\u0947\u091F\u093E\u092C\u0947\u0938 \u092E\u0947\u0902 \u0928\u0939\u0940\u0902\u0964 " +
+                    "\u0916\u0941\u0930\u093E\u0915, \u091F\u093E\u0907\u092E\u093F\u0902\u0917 \u0914\u0930 \u0926\u0941\u0937\u094D\u092A\u094D\u0930\u092D\u093E\u0935 \u0915\u0940 \u091C\u093E\u0928\u0915\u093E\u0930\u0940 \u092F\u0939\u093E\u0901 \u0928\u0939\u0940\u0902 \u0926\u0940 \u0917\u0908 \u0939\u0948\u0964 " +
+                    "\u092A\u0942\u0930\u0940 \u091C\u093E\u0928\u0915\u093E\u0930\u0940 \u0915\u0947 \u0932\u093F\u090F \u0905\u092A\u0928\u0947 \u092B\u093E\u0930\u094D\u092E\u093E\u0938\u093F\u0938\u094D\u091F \u092F\u093E \u0921\u0949\u0915\u094D\u091F\u0930 \u0938\u0947 \u092A\u0930\u093E\u092E\u0930\u094D\u0936 \u0915\u0930\u0947\u0902\u0964"
+        else
+            "\u2139 This brand is in our identification database but not our verified clinical database. " +
+                    "Dose, timing, and side-effect information are not shown here. " +
+                    "Consult your pharmacist or doctor for full information."
+        appendItalicGrey(sb, t2disclaimer)
     }
 
-    // ============================================================
-    // SPEAKABLE TEXT
-    // ============================================================
+    // ─────────────────────────────────────────────────────────
+    // ALTERNATIVES BLOCK  ← NEW (Part 3)
+    // ─────────────────────────────────────────────────────────
+
+    private fun appendAlternativesBlock(sb: SpannableStringBuilder, med: MedicineInfo) {
+        // Safety gate: H1 check happens inside getAlternatives(),
+        // but we double-check here so the UI never even queries
+        val schedule = med.legalSchedule?.uppercase() ?: ""
+        if (schedule.contains("H1")) return
+
+        val alternatives = medicineLookup.getAlternatives(med)
+        if (alternatives.isEmpty()) return
+
+        sb.append("\n")
+
+        val sectionLabel = if (currentLanguage == "hi")
+            "\u0907\u0938\u0940 \u0926\u0935\u093E \u0914\u0930 \u0916\u0941\u0930\u093E\u0915 \u0935\u093E\u0932\u0947 \u0935\u0948\u0915\u0932\u094D\u092A\u093F\u0915 \u092C\u094D\u0930\u093E\u0902\u0921:"
+        else
+            "Alternative brands with the same medicine and dose:"
+        appendBold(sb, sectionLabel)
+        sb.append("\n")
+
+        for (alt in alternatives) {
+            sb.append("\u2022 ")
+            appendBold(sb, alt.brandName)
+            if (!alt.manufacturer.isNullOrBlank()) {
+                sb.append("  ")
+                appendItalicGrey(sb, "(${alt.manufacturer})")
+            }
+            sb.append("\n")
+        }
+
+        sb.append("\n")
+        val altDisclaimer = if (currentLanguage == "hi")
+            "\u26A0 \u092C\u0926\u0932\u0928\u0947 \u0938\u0947 \u092A\u0939\u0932\u0947 \u0939\u092E\u0947\u0936\u093E \u092B\u093E\u0930\u094D\u092E\u093E\u0938\u093F\u0938\u094D\u091F \u0938\u0947 \u092A\u0941\u0937\u094D\u091F\u093F \u0915\u0930\u0947\u0902\u0964"
+        else
+            "\u26A0 Always confirm with a pharmacist before substituting."
+        appendItalicGrey(sb, altDisclaimer)
+        sb.append("\n")
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // TIER BADGE RENDERER  ← NEW
+    // ─────────────────────────────────────────────────────────
+
+    private fun appendTierBadge(sb: SpannableStringBuilder, tier: ResultTier) {
+        val (badgeText, bgColor, fgColor) = when (tier) {
+            ResultTier.TIER_1A   -> Triple("  \u2713 VERIFIED  ",   "#E8F5E9", "#1B5E20")
+            ResultTier.TIER_2    -> Triple("  \u26A0 IDENTIFIED  ", "#FFFDE7", "#E65100")
+            ResultTier.NOT_FOUND -> Triple("  \u2717 NOT FOUND  ",  "#F5F5F5", "#757575")
+        }
+        val start = sb.length
+        sb.append(badgeText)
+        val end = sb.length
+        sb.setSpan(
+            BackgroundColorSpan(Color.parseColor(bgColor)),
+            start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        sb.setSpan(
+            ForegroundColorSpan(Color.parseColor(fgColor)),
+            start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        sb.setSpan(
+            StyleSpan(Typeface.BOLD),
+            start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        sb.setSpan(
+            RelativeSizeSpan(0.85f),
+            start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // SPEAKABLE TEXT  (unchanged)
+    // ─────────────────────────────────────────────────────────
 
     private fun buildSpeakableText(medicines: List<MedicineInfo>): String {
         if (medicines.isEmpty()) {
             return if (currentLanguage == "hi")
-                "इस छवि में कोई ज्ञात दवा नहीं मिली। कृपया अपने फार्मासिस्ट से परामर्श करें।"
+                "\u0907\u0938 \u091B\u0935\u093F \u092E\u0947\u0902 \u0915\u094B\u0908 \u091C\u094D\u091E\u093E\u0924 \u0926\u0935\u093E \u0928\u0939\u0940\u0902 \u092E\u093F\u0932\u0940\u0964 \u0915\u0943\u092A\u092F\u093E \u0905\u092A\u0928\u0947 \u092B\u093E\u0930\u094D\u092E\u093E\u0938\u093F\u0938\u094D\u091F \u0938\u0947 \u092A\u0930\u093E\u092E\u0930\u094D\u0936 \u0915\u0930\u0947\u0902\u0964"
             else
                 "No known medicine was found in this image. Please consult your pharmacist."
         }
-
         val parts = mutableListOf<String>()
         for (med in medicines) {
             val template = med.category?.let { medicineLookup.getTemplate(currentLanguage, it) }
             val sb = StringBuilder()
-
             if (med.criticalWarnings.isNotEmpty()) {
-                val w = med.criticalWarnings.first()
+                val w    = med.criticalWarnings.first()
                 val text = pickLang(w.textEn, w.textHi)
                 sb.append(
-                    if (currentLanguage == "hi") "अत्यंत महत्वपूर्ण: " else "Critical warning: "
+                    if (currentLanguage == "hi") "\u0905\u0924\u094D\u092F\u0902\u0924 \u092E\u0939\u0924\u094D\u0935\u092A\u0942\u0930\u094D\u0923: " else "Critical warning: "
                 )
                 sb.append(text).append(". ")
             }
-
             val intro = template?.introTemplate?.replace("{GENERIC}", med.genericName)
-                ?: if (currentLanguage == "hi")
-                    "यह ${med.genericName} है।"
-                else
-                    "This is ${med.genericName}."
+                ?: if (currentLanguage == "hi") "\u092F\u0939 ${med.genericName} \u0939\u0948\u0964"
+                else "This is ${med.genericName}."
             sb.append(intro).append(" ")
-
             if (!med.dose.isNullOrBlank()) {
                 val doseLine = template?.doseLabel?.replace("{DOSE}", med.dose)
-                    ?: if (currentLanguage == "hi") "सामान्य खुराक: ${med.dose}"
+                    ?: if (currentLanguage == "hi") "\u0938\u093E\u092E\u093E\u0928\u094D\u092F \u0916\u0941\u0930\u093E\u0915: ${med.dose}"
                     else "Usual adult dose: ${med.dose}"
                 sb.append(doseLine).append(". ")
             }
-
             val timing = if (currentLanguage == "hi" && !med.timingNoteHi.isNullOrBlank())
                 med.timingNoteHi else med.timingNote
-            if (!timing.isNullOrBlank()) {
-                sb.append(timing).append(" ")
-            }
-
+            if (!timing.isNullOrBlank()) sb.append(timing).append(" ")
             sb.append(
                 if (currentLanguage == "hi")
-                    "कृपया लेने से पहले डॉक्टर से परामर्श करें।"
+                    "\u0915\u0943\u092A\u092F\u093E \u0932\u0947\u0928\u0947 \u0938\u0947 \u092A\u0939\u0932\u0947 \u0921\u0949\u0915\u094D\u091F\u0930 \u0938\u0947 \u092A\u0930\u093E\u092E\u0930\u094D\u0936 \u0915\u0930\u0947\u0902\u0964"
                 else
                     "Please consult a doctor before taking this medicine."
             )
-
             parts.add(sb.toString())
         }
         return parts.joinToString("\n\n")
     }
 
-    // ============================================================
-    // SPAN HELPERS
-    // ============================================================
+    // ─────────────────────────────────────────────────────────
+    // HELPERS  (unchanged)
+    // ─────────────────────────────────────────────────────────
+
+    private fun pickLang(en: String, hi: String?): String =
+        if (currentLanguage == "hi" && !hi.isNullOrBlank()) hi else en
+
+    private fun pregnancyMeaning(cat: String, lang: String): String {
+        return if (lang == "hi") {
+            when (cat) {
+                "A"  -> "\u0938\u093E\u092E\u093E\u0928\u094D\u092F \u0916\u0941\u0930\u093E\u0915 \u092A\u0930 \u0938\u0941\u0930\u0915\u094D\u0937\u093F\u0924"
+                "B"  -> "\u0915\u094B\u0908 \u091C\u094D\u091E\u093E\u0924 \u0916\u0924\u0930\u093E \u0928\u0939\u0940\u0902"
+                "C"  -> "\u0915\u0947\u0935\u0932 \u091C\u0930\u0942\u0930\u0924 \u092A\u0930 \u0921\u0949\u0915\u094D\u091F\u0930 \u0915\u0940 \u0938\u0932\u093E\u0939 \u0938\u0947"
+                "D"  -> "\u092C\u091A\u094D\u091A\u0947 \u0915\u094B \u0916\u0924\u0930\u093E, \u0915\u0947\u0935\u0932 \u0906\u0935\u0936\u094D\u092F\u0915 \u0939\u094B\u0928\u0947 \u092A\u0930"
+                "X"  -> "\u0917\u0930\u094D\u092D\u093E\u0935\u0938\u094D\u0925\u093E \u092E\u0947\u0902 \u092C\u093F\u0932\u094D\u0915\u0941\u0932 \u0928 \u0932\u0947\u0902"
+                else -> "\u091C\u093E\u0928\u0915\u093E\u0930\u0940 \u0905\u0928\u0941\u092A\u0932\u092C\u094D\u0927"
+            }
+        } else {
+            when (cat) {
+                "A"  -> "Safe at normal doses"
+                "B"  -> "No known risk"
+                "C"  -> "Use only if benefit outweighs risk"
+                "D"  -> "Known risk to baby, use only if essential"
+                "X"  -> "Do NOT use in pregnancy"
+                else -> "Information not available"
+            }
+        }
+    }
 
     private fun appendHeader(sb: SpannableStringBuilder, text: String) {
         val start = sb.length
@@ -722,10 +952,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        if (::tts.isInitialized) {
-            tts.stop()
-            tts.shutdown()
-        }
+        if (::tts.isInitialized) { tts.stop(); tts.shutdown() }
+        gemmaReasoner?.close()
         cameraExecutor.shutdown()
     }
 }

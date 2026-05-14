@@ -4,11 +4,7 @@ plugins {
 
 android {
     namespace = "com.remedium.app"
-    compileSdk {
-        version = release(36) {
-            minorApiLevel = 1
-        }
-    }
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.remedium.app"
@@ -52,6 +48,12 @@ dependencies {
     implementation("androidx.camera:camera-view:1.6.1")
 
     implementation("com.google.mlkit:text-recognition:16.0.1")
+
+    // LiteRT-LM for Gemma 4 inference (Day 2+)
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.11.0")
+
+    // Coroutines for background threading
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.espresso.core)

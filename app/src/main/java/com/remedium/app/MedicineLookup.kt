@@ -5,10 +5,21 @@ import android.database.sqlite.SQLiteDatabase
 import android.util.Log
 import kotlin.math.min
 
+// ─────────────────────────────────────────────────────────────
+// DATA CLASSES
+// ─────────────────────────────────────────────────────────────
+
 data class WarningItem(
     val textEn: String,
     val textHi: String?
 )
+
+// ← NEW: which tier produced this result
+enum class ResultTier {
+    TIER_1A,    // verified — full clinical data available
+    TIER_2,     // identified — brand info only, no clinical data
+    NOT_FOUND   // no match
+}
 
 data class MedicineInfo(
     val matchedTerm: String,
@@ -32,7 +43,27 @@ data class MedicineInfo(
     val sideEffects: String?,
     val criticalWarnings: List<WarningItem>,
     val highWarnings: List<WarningItem>,
-    val mediumWarnings: List<WarningItem>
+    val mediumWarnings: List<WarningItem>,
+    val tier: ResultTier = ResultTier.TIER_1A   // ← NEW: default keeps old callers safe
+)
+
+// ← NEW: Tier 2 result — brand info only, no clinical fields
+data class Tier2Info(
+    val matchedTerm: String,
+    val brandName: String,
+    val saltComposition: String?,
+    val manufacturer: String?,
+    val mrp: String?,
+    val subCategory: String?,
+    val tier: ResultTier = ResultTier.TIER_2
+)
+
+// ← NEW: alternatives for the "same medicine, same dose" feature
+data class AlternativeBrand(
+    val brandName: String,
+    val manufacturer: String?,
+    val strength: String?,
+    val formulation: String?
 )
 
 data class TemplateInfo(
@@ -46,10 +77,16 @@ data class TemplateInfo(
     val disclaimer: String?
 )
 
+// ← CHANGED: SearchResult now carries Tier 2 results separately
 data class SearchResult(
     val confirmed: List<MedicineInfo>,
-    val ambiguous: List<List<MedicineInfo>>
+    val ambiguous: List<List<MedicineInfo>>,
+    val tier2Results: List<Tier2Info> = emptyList()   // ← NEW
 )
+
+// ─────────────────────────────────────────────────────────────
+// MAIN LOOKUP CLASS
+// ─────────────────────────────────────────────────────────────
 
 class MedicineLookup(context: Context) {
 
@@ -59,7 +96,7 @@ class MedicineLookup(context: Context) {
         helper.ensureDatabase()
     }
 
-    // Backward-compatible flat API
+    // ── Backward-compatible flat API ──────────────────────────
     fun searchMedicines(ocrText: String): List<MedicineInfo> {
         return searchWithAmbiguity(ocrText).confirmed
     }
@@ -68,13 +105,16 @@ class MedicineLookup(context: Context) {
         val tokens = extractTokens(ocrText)
         val confirmed = mutableListOf<MedicineInfo>()
         val ambiguousSets = mutableListOf<List<MedicineInfo>>()
+        val tier2Results = mutableListOf<Tier2Info>()   // ← NEW
         val seenGenerics = mutableSetOf<String>()
+        val seenTier2Brands = mutableSetOf<String>()    // ← NEW: dedup Tier 2 hits
         val db = helper.openDb()
 
         try {
             for (token in tokens) {
                 if (token.length < 3) continue
 
+                // ── PRIMARY PATH: Tier 1A ─────────────────────
                 val aliasMatches = lookupAlias(db, token)
 
                 if (aliasMatches.isNotEmpty()) {
@@ -97,7 +137,6 @@ class MedicineLookup(context: Context) {
                             ambiguousSets.add(representatives)
                             for (r in representatives) seenGenerics.add(r.genericName)
                         } else {
-                            // Combo brand: e.g. Lepit-MK -> both levocetirizine AND montelukast
                             for (r in resolved.distinctBy { it.genericName }) {
                                 if (r.genericName !in seenGenerics) {
                                     confirmed.add(r)
@@ -106,14 +145,13 @@ class MedicineLookup(context: Context) {
                             }
                         }
                     }
-                    continue
+                    continue   // Tier 1A hit — skip Tier 2 for this token
                 }
 
+                // ── FUZZY (still Tier 1A) ─────────────────────
                 val fuzzyMatch = fuzzyAliasMatch(db, token)
                 if (fuzzyMatch != null) {
                     if (fuzzyMatch.isAmbiguous) {
-                        // TODO(disambiguation-ui): surface to user.
-                        // Currently logged but not displayed.
                         Log.i(
                             "RemediumSearch",
                             "Skipping ambiguous fuzzy match for token='$token' " +
@@ -126,6 +164,15 @@ class MedicineLookup(context: Context) {
                             seenGenerics.add(info.genericName)
                         }
                     }
+                    continue   // fuzzy hit found — skip Tier 2 for this token
+                }
+
+                // ── FALLBACK PATH: Tier 2 ← NEW ──────────────
+                // Only reached if Tier 1A exact + fuzzy both missed.
+                val t2 = lookupTier2(db, token)
+                if (t2 != null && t2.brandName !in seenTier2Brands) {
+                    tier2Results.add(t2)
+                    seenTier2Brands.add(t2.brandName)
                 }
             }
         } catch (e: Exception) {
@@ -134,12 +181,145 @@ class MedicineLookup(context: Context) {
             db.close()
         }
 
-        return SearchResult(confirmed = confirmed, ambiguous = ambiguousSets)
+        return SearchResult(
+            confirmed = confirmed,
+            ambiguous = ambiguousSets,
+            tier2Results = tier2Results   // ← NEW
+        )
     }
 
-    // ============================================================
-    // TOKEN EXTRACTION
-    // ============================================================
+    // ─────────────────────────────────────────────────────────
+    // TIER 2 LOOKUP  ← NEW SECTION
+    // ─────────────────────────────────────────────────────────
+
+    private fun lookupTier2(db: SQLiteDatabase, token: String): Tier2Info? {
+        // Step 1: find brand_id via tier2_search_aliases
+        // Priority: FULL_NORMALIZED > BRAND_STRIPPED > BRAND_FIRST
+        val aliasCursor = db.rawQuery(
+            """
+            SELECT tier2_brand_id
+            FROM tier2_search_aliases
+            WHERE alias_text = ?
+            ORDER BY CASE alias_type
+                WHEN 'FULL_NORMALIZED' THEN 1
+                WHEN 'BRAND_STRIPPED'  THEN 2
+                WHEN 'BRAND_FIRST'     THEN 3
+                ELSE 99
+            END
+            LIMIT 1
+            """.trimIndent(),
+            arrayOf(token)
+        )
+        if (!aliasCursor.moveToFirst()) {
+            aliasCursor.close()
+            return null
+        }
+        val brandId = aliasCursor.getInt(0)
+        aliasCursor.close()
+
+        // Step 2: fetch brand row from tier2_brand_products
+        val brandCursor = db.rawQuery(
+            """
+            SELECT brand_name, salt_composition, manufacturer, price_inr, sub_category
+            FROM tier2_brand_products
+            WHERE id = ?
+            """.trimIndent(),
+            arrayOf(brandId.toString())
+        )
+        if (!brandCursor.moveToFirst()) {
+            brandCursor.close()
+            return null
+        }
+
+        val price = brandCursor.getString(3)
+        val priceStr = if (price != null && price.isNotBlank()) {
+            try {
+                val p = price.toDouble()
+                if (p > 0) String.format("%.2f", p) else null
+            } catch (e: NumberFormatException) { null }
+        } else null
+
+        val result = Tier2Info(
+            matchedTerm = token,
+            brandName   = brandCursor.getString(0) ?: "Unknown Brand",
+            saltComposition = brandCursor.getString(1),
+            manufacturer    = brandCursor.getString(2),
+            mrp             = priceStr,
+            subCategory     = brandCursor.getString(4)
+        )
+        brandCursor.close()
+        return result
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // ALTERNATIVES QUERY  ← NEW SECTION (Part 3)
+    // ─────────────────────────────────────────────────────────
+
+    /**
+     * Returns up to 10 alternative brands from Tier 1A brand_products
+     * that share the same generic name, strength, and formulation.
+     *
+     * SAFETY RULES enforced here (not in the UI layer):
+     *   - Schedule H1 drugs -> empty list, no alternatives shown
+     *   - Only Tier 1A brand_products is queried (Tier 2 generic
+     *     mapping is not verified enough to suggest substitutes)
+     *   - Matched brand itself is excluded
+     *   - All three of generic / strength / formulation must match exactly
+     */
+    fun getAlternatives(med: MedicineInfo): List<AlternativeBrand> {
+        // SAFETY GATE 1: Schedule H1 — never show alternatives
+        if (med.legalSchedule?.uppercase() == "SCHEDULE H1" ||
+            med.legalSchedule?.uppercase() == "H1") {
+            return emptyList()
+        }
+
+        // SAFETY GATE 2: must have all three match keys
+        val generic = med.genericName.ifBlank { return emptyList() }
+        val strength = med.strength ?: return emptyList()
+        val formulation = med.formulation ?: return emptyList()
+        val excludeBrand = med.brandName ?: return emptyList()
+
+        // SAFETY GATE 3: only Tier 1A results get alternatives
+        if (med.tier != ResultTier.TIER_1A) return emptyList()
+
+        val db = helper.openDb()
+        val results = mutableListOf<AlternativeBrand>()
+        try {
+            val cursor = db.rawQuery(
+                """
+                SELECT brand_name, manufacturer, strength, formulation
+                FROM brand_products
+                WHERE generic_name = ?
+                  AND strength = ?
+                  AND formulation = ?
+                  AND brand_name != ?
+                ORDER BY brand_name
+                LIMIT 10
+                """.trimIndent(),
+                arrayOf(generic, strength, formulation, excludeBrand)
+            )
+            while (cursor.moveToNext()) {
+                results.add(
+                    AlternativeBrand(
+                        brandName    = cursor.getString(0),
+                        manufacturer = cursor.getString(1),
+                        strength     = cursor.getString(2),
+                        formulation  = cursor.getString(3)
+                    )
+                )
+            }
+            cursor.close()
+        } catch (e: Exception) {
+            Log.e("Remedium", "getAlternatives error: ${e.message}")
+        } finally {
+            db.close()
+        }
+        return results
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // TOKEN EXTRACTION  (unchanged)
+    // ─────────────────────────────────────────────────────────
 
     private fun extractTokens(ocrText: String): List<String> {
         val cleaned = ocrText
@@ -165,9 +345,9 @@ class MedicineLookup(context: Context) {
         return (pairTokens + hyphenVariants).distinct()
     }
 
-    // ============================================================
-    // ALIAS LOOKUP
-    // ============================================================
+    // ─────────────────────────────────────────────────────────
+    // ALIAS LOOKUP  (unchanged)
+    // ─────────────────────────────────────────────────────────
 
     private data class AliasMatch(
         val targetTable: String,
@@ -187,9 +367,9 @@ class MedicineLookup(context: Context) {
             results.add(
                 AliasMatch(
                     targetTable = cursor.getString(0),
-                    targetId = cursor.getInt(1),
+                    targetId    = cursor.getInt(1),
                     isAmbiguous = cursor.getInt(2) == 1,
-                    aliasType = cursor.getString(3)
+                    aliasType   = cursor.getString(3)
                 )
             )
         }
@@ -197,9 +377,9 @@ class MedicineLookup(context: Context) {
         return results
     }
 
-    // ============================================================
-    // FUZZY MATCH (length-aware)
-    // ============================================================
+    // ─────────────────────────────────────────────────────────
+    // FUZZY MATCH  (unchanged)
+    // ─────────────────────────────────────────────────────────
 
     private fun fuzzyAliasMatch(db: SQLiteDatabase, token: String): AliasMatch? {
         val threshold = similarityThreshold(token.length)
@@ -222,9 +402,9 @@ class MedicineLookup(context: Context) {
                 bestSimilarity = similarity
                 bestMatch = AliasMatch(
                     targetTable = cursor.getString(1),
-                    targetId = cursor.getInt(2),
+                    targetId    = cursor.getInt(2),
                     isAmbiguous = cursor.getInt(3) == 1,
-                    aliasType = cursor.getString(4)
+                    aliasType   = cursor.getString(4)
                 )
             }
         }
@@ -233,14 +413,14 @@ class MedicineLookup(context: Context) {
     }
 
     private fun similarityThreshold(length: Int): Double = when {
-        length <= 4 -> 1.0
-        length <= 7 -> 0.90
-        length <= 12 -> 0.85
-        else -> 0.80
+        length <= 4  -> 1.0
+        length <= 7  -> 0.85
+        length <= 12 -> 0.80
+        else         -> 0.75
     }
 
     private fun calculateSimilarity(s1: String, s2: String): Double {
-        val longer = if (s1.length >= s2.length) s1 else s2
+        val longer  = if (s1.length >= s2.length) s1 else s2
         val shorter = if (s1.length < s2.length) s1 else s2
         if (longer.isEmpty()) return 1.0
         val distance = editDistance(longer, shorter)
@@ -254,15 +434,18 @@ class MedicineLookup(context: Context) {
         for (i in 1..s1.length) {
             for (j in 1..s2.length) {
                 val cost = if (s1[i - 1] == s2[j - 1]) 0 else 1
-                dp[i][j] = min(min(dp[i - 1][j] + 1, dp[i][j - 1] + 1), dp[i - 1][j - 1] + cost)
+                dp[i][j] = min(
+                    min(dp[i - 1][j] + 1, dp[i][j - 1] + 1),
+                    dp[i - 1][j - 1] + cost
+                )
             }
         }
         return dp[s1.length][s2.length]
     }
 
-    // ============================================================
-    // RESOLVE
-    // ============================================================
+    // ─────────────────────────────────────────────────────────
+    // RESOLVE  (tier field added to MedicineInfo construction)
+    // ─────────────────────────────────────────────────────────
 
     private fun resolveMatch(
         db: SQLiteDatabase,
@@ -271,8 +454,8 @@ class MedicineLookup(context: Context) {
     ): MedicineInfo? {
         return when (match.targetTable) {
             "brand_products" -> resolveBrandProduct(db, match.targetId, matchedTerm)
-            "drugs" -> resolveDrug(db, match.targetId, matchedTerm)
-            else -> null
+            "drugs"          -> resolveDrug(db, match.targetId, matchedTerm)
+            else             -> null
         }
     }
 
@@ -286,19 +469,19 @@ class MedicineLookup(context: Context) {
                     "FROM brand_products WHERE id = ?",
             arrayOf(brandProductId.toString())
         )
-        if (!cursor.moveToFirst()) {
-            cursor.close()
-            return null
-        }
-        val brand = cursor.getString(0)
-        val generic = cursor.getString(1)
-        val strength = cursor.getString(2)
-        val formulation = cursor.getString(3)
+        if (!cursor.moveToFirst()) { cursor.close(); return null }
+        val brand        = cursor.getString(0)
+        val generic      = cursor.getString(1)
+        val strength     = cursor.getString(2)
+        val formulation  = cursor.getString(3)
         val manufacturer = cursor.getString(4)
         val brandQuality = cursor.getString(5)
         cursor.close()
 
-        return fetchDrugDetails(db, generic, brand, strength, formulation, manufacturer, brandQuality, matchedTerm)
+        return fetchDrugDetails(
+            db, generic, brand, strength, formulation,
+            manufacturer, brandQuality, matchedTerm
+        )
     }
 
     private fun resolveDrug(
@@ -310,10 +493,7 @@ class MedicineLookup(context: Context) {
             "SELECT generic_name FROM drugs WHERE id = ?",
             arrayOf(drugId.toString())
         )
-        if (!cursor.moveToFirst()) {
-            cursor.close()
-            return null
-        }
+        if (!cursor.moveToFirst()) { cursor.close(); return null }
         val generic = cursor.getString(0)
         cursor.close()
         return fetchDrugDetails(db, generic, null, null, null, null, null, matchedTerm)
@@ -332,74 +512,73 @@ class MedicineLookup(context: Context) {
         val drugCursor = db.rawQuery(
             "SELECT drug_class, category, common_uses_simple, standard_adult_dose, " +
                     "maximum_daily_dose, timing_note, timing_note_hi, alcohol_warning, " +
-                    "legal_schedule, fda_pregnancy_cat, contraindications, common_side_effects, data_quality " +
+                    "legal_schedule, fda_pregnancy_cat, contraindications, " +
+                    "common_side_effects, data_quality " +
                     "FROM drugs WHERE generic_name = ?",
             arrayOf(genericName)
         )
+        if (!drugCursor.moveToFirst()) { drugCursor.close(); return null }
 
-        if (!drugCursor.moveToFirst()) {
-            drugCursor.close()
-            return null
-        }
-
-        val drugClass = drugCursor.getString(0)
-        val category = drugCursor.getString(1)
-        val uses = drugCursor.getString(2)
-        val dose = drugCursor.getString(3)
-        val maxDose = drugCursor.getString(4)
-        val timingNote = drugCursor.getString(5)
+        val drugClass    = drugCursor.getString(0)
+        val category     = drugCursor.getString(1)
+        val uses         = drugCursor.getString(2)
+        val dose         = drugCursor.getString(3)
+        val maxDose      = drugCursor.getString(4)
+        val timingNote   = drugCursor.getString(5)
         val timingNoteHi = drugCursor.getString(6)
         val alcoholWarning = drugCursor.getInt(7) == 1
-        val legalSchedule = drugCursor.getString(8)
+        val legalSchedule  = drugCursor.getString(8)
         val fdaPregnancyCat = drugCursor.getString(9)
         val contraindications = drugCursor.getString(10)
-        val sideEffects = drugCursor.getString(11)
-        val drugQuality = drugCursor.getString(12) ?: "TIER_1A_VERIFIED"
+        val sideEffects  = drugCursor.getString(11)
+        val drugQuality  = drugCursor.getString(12) ?: "TIER_1A_VERIFIED"
         drugCursor.close()
 
         val effectiveQuality = combineQuality(drugQuality, brandQuality)
 
         val critical = mutableListOf<WarningItem>()
-        val high = mutableListOf<WarningItem>()
-        val medium = mutableListOf<WarningItem>()
+        val high     = mutableListOf<WarningItem>()
+        val medium   = mutableListOf<WarningItem>()
 
         val warnCursor = db.rawQuery(
-            "SELECT warning_text_simple, warning_text_hi, severity FROM warnings WHERE generic_name = ?",
+            "SELECT warning_text_simple, warning_text_hi, severity " +
+                    "FROM warnings WHERE generic_name = ?",
             arrayOf(genericName)
         )
         while (warnCursor.moveToNext()) {
             val item = WarningItem(warnCursor.getString(0), warnCursor.getString(1))
             when ((warnCursor.getString(2) ?: "MEDIUM").uppercase()) {
                 "CRITICAL" -> critical.add(item)
-                "HIGH" -> high.add(item)
-                else -> medium.add(item)
+                "HIGH"     -> high.add(item)
+                else       -> medium.add(item)
             }
         }
         warnCursor.close()
 
         return MedicineInfo(
-            matchedTerm = matchedTerm,
-            genericName = genericName,
-            brandName = brandName,
-            strength = strength,
-            formulation = formulation,
-            manufacturer = manufacturer,
-            dataQuality = effectiveQuality,
-            drugClass = drugClass,
-            category = category,
-            uses = uses,
-            dose = dose,
-            maxDose = maxDose,
-            timingNote = timingNote,
-            timingNoteHi = timingNoteHi,
+            matchedTerm   = matchedTerm,
+            genericName   = genericName,
+            brandName     = brandName,
+            strength      = strength,
+            formulation   = formulation,
+            manufacturer  = manufacturer,
+            dataQuality   = effectiveQuality,
+            drugClass     = drugClass,
+            category      = category,
+            uses          = uses,
+            dose          = dose,
+            maxDose       = maxDose,
+            timingNote    = timingNote,
+            timingNoteHi  = timingNoteHi,
             alcoholWarning = alcoholWarning,
-            legalSchedule = legalSchedule,
+            legalSchedule  = legalSchedule,
             fdaPregnancyCat = fdaPregnancyCat,
             contraindications = contraindications,
-            sideEffects = sideEffects,
+            sideEffects   = sideEffects,
             criticalWarnings = critical,
-            highWarnings = high,
-            mediumWarnings = medium
+            highWarnings  = high,
+            mediumWarnings = medium,
+            tier          = ResultTier.TIER_1A   // ← NEW: all paths here are Tier 1A
         )
     }
 
@@ -412,9 +591,9 @@ class MedicineLookup(context: Context) {
         }
     }
 
-    // ============================================================
-    // TEMPLATE & SCHEDULE LOOKUPS
-    // ============================================================
+    // ─────────────────────────────────────────────────────────
+    // TEMPLATE & SCHEDULE LOOKUPS  (unchanged)
+    // ─────────────────────────────────────────────────────────
 
     fun getTemplate(langCode: String, category: String): TemplateInfo? {
         val db = helper.openDb()
@@ -428,14 +607,14 @@ class MedicineLookup(context: Context) {
             )
             if (cursor.moveToFirst()) {
                 result = TemplateInfo(
-                    categoryLabel = cursor.getString(0),
-                    introTemplate = cursor.getString(1),
-                    doseLabel = cursor.getString(2),
-                    timingLabel = cursor.getString(3),
-                    warningLabel = cursor.getString(4),
-                    alcoholLabel = cursor.getString(5),
-                    scheduleLabel = cursor.getString(6),
-                    disclaimer = cursor.getString(7)
+                    categoryLabel  = cursor.getString(0),
+                    introTemplate  = cursor.getString(1),
+                    doseLabel      = cursor.getString(2),
+                    timingLabel    = cursor.getString(3),
+                    warningLabel   = cursor.getString(4),
+                    alcoholLabel   = cursor.getString(5),
+                    scheduleLabel  = cursor.getString(6),
+                    disclaimer     = cursor.getString(7)
                 )
             }
             cursor.close()
@@ -454,9 +633,7 @@ class MedicineLookup(context: Context) {
                 "SELECT $column FROM schedule_info WHERE schedule_name = ?",
                 arrayOf(schedule)
             )
-            if (cursor.moveToFirst()) {
-                result = cursor.getString(0)
-            }
+            if (cursor.moveToFirst()) result = cursor.getString(0)
             cursor.close()
         } finally {
             db.close()

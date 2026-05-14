@@ -19,3 +19,9 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# LiteRT-LM (Gemma 4) rules - required for Day 2+ model inference
+-keep class com.google.ai.edge.litertlm.** { *; }
+-keep class com.google.flatbuffers.** { *; }
+-dontwarn com.google.ai.edge.litertlm.**
+-dontwarn com.google.flatbuffers.**

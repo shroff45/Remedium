@@ -12,7 +12,7 @@ class DatabaseHelper(private val context: Context) :
 
     companion object {
         const val DB_NAME = "remedium.db"
-        const val DB_VERSION = 7
+        const val DB_VERSION = 10
         private const val TAG = "RemediumDB"
     }
 
