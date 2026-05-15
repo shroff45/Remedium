@@ -47,8 +47,8 @@ class GemmaReasoner private constructor(private val context: Context) {
     // TODO Day 4: add assets copy for production APK
     private val modelPath = "/data/local/tmp/gemma.litertlm"
 
-    // 45 second timeout - balance for rural devices but not too long
-    private val inferenceTimeoutMs = 45_000L
+    // 35 second timeout - enough for drug interaction prompts
+    private val inferenceTimeoutMs = 35_000L
 
     // Flag to track timeout state
     private val timedOut = AtomicBoolean(false)

@@ -121,4 +121,45 @@ $patientContext
 QUESTION: $userQuestion
 """.trimIndent()
     }
+
+    /**
+     * Builds a strict grounding prompt for drug interaction analysis.
+     * Forces Gemma to output in parseable format for UI extraction.
+     *
+     * @param med1 First medicine
+     * @param med2 Second medicine
+     * @return Formatted prompt with exact output format instructions
+     */
+    fun buildInteractionPrompt(med1: MedicineInfo, med2: MedicineInfo): String {
+        val warnings1 = (med1.criticalWarnings.map { it.textEn } +
+                med1.highWarnings.map { it.textEn } +
+                med1.mediumWarnings.map { it.textEn }).joinToString("; ")
+
+        val warnings2 = (med2.criticalWarnings.map { it.textEn } +
+                med2.highWarnings.map { it.textEn } +
+                med2.mediumWarnings.map { it.textEn }).joinToString("; ")
+
+        return """
+You are a clinical AI pharmacist. Check for interactions between these two medicines using ONLY the provided data. Do not invent information.
+
+MEDICINE 1: ${med1.genericName}
+Uses: ${med1.uses ?: "N/A"}
+Dose: ${med1.dose ?: "N/A"}
+Warnings: ${if (warnings1.isNotBlank()) warnings1 else "None"}
+Contraindications: ${med1.contraindications ?: "None"}
+Side Effects: ${med1.sideEffects ?: "N/A"}
+
+MEDICINE 2: ${med2.genericName}
+Uses: ${med2.uses ?: "N/A"}
+Dose: ${med2.dose ?: "N/A"}
+Warnings: ${if (warnings2.isNotBlank()) warnings2 else "None"}
+Contraindications: ${med2.contraindications ?: "None"}
+Side Effects: ${med2.sideEffects ?: "N/A"}
+
+Evaluate safety. Respond STRICTLY in this exact format, with no extra conversational text:
+VERDICT: [SAFE TO COMBINE or NO or CONSULT DOCTOR]
+REASON: [1-2 short sentences using ONLY the context above]
+WATCH FOR: [Overlapping side effects or specific risks]
+        """.trimIndent()
+    }
 }

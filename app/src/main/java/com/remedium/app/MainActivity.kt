@@ -35,10 +35,12 @@ import androidx.camera.view.PreviewView
 import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.cardview.widget.CardView
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import android.widget.EditText
+import android.widget.LinearLayout
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -61,10 +63,19 @@ class MainActivity : AppCompatActivity() {
     private lateinit var speakButton: Button
     private lateinit var zoomButton: Button
     private lateinit var askQuestionButton: FloatingActionButton
+    private lateinit var btnAddMedicine: Button
+    private lateinit var cardInteraction: androidx.cardview.widget.CardView
+    private lateinit var layoutInteractionBg: LinearLayout
+    private lateinit var tvInteractionTitle: TextView
+    private lateinit var tvInteractionVerdict: TextView
+    private lateinit var tvInteractionReason: TextView
+    private lateinit var tvInteractionWatchFor: TextView
     private lateinit var medicineLookup: MedicineLookup
     private var gemmaReasoner: GemmaReasoner? = null
     private var gemmaReady = false
     private var hasTier1A = false  // Track if current result has Tier 1A
+    private val scannedMedicines = mutableListOf<MedicineInfo>()  // Track multiple medicines for interaction check
+    private var isAddingSecondMedicine = false  // Flag for adding second medicine
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val ioScope = CoroutineScope(Dispatchers.IO)
 
@@ -103,6 +114,13 @@ class MainActivity : AppCompatActivity() {
         speakButton           = findViewById(R.id.speakButton)
         zoomButton            = findViewById(R.id.zoomButton)
         askQuestionButton    = findViewById(R.id.askQuestionButton)
+        btnAddMedicine = findViewById(R.id.btnAddMedicine)
+        cardInteraction = findViewById(R.id.cardInteraction)
+        layoutInteractionBg = findViewById(R.id.layoutInteractionBg)
+        tvInteractionTitle = findViewById(R.id.tvInteractionTitle)
+        tvInteractionVerdict = findViewById(R.id.tvInteractionVerdict)
+        tvInteractionReason = findViewById(R.id.tvInteractionReason)
+        tvInteractionWatchFor = findViewById(R.id.tvInteractionWatchFor)
 
         medicineLookup = MedicineLookup(this)
 
@@ -169,6 +187,16 @@ class MainActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
             showQuestionDialog()
+        }
+
+        btnAddMedicine.setOnClickListener {
+            isAddingSecondMedicine = true
+            btnAddMedicine.visibility = View.GONE
+            statusText.text = "Scan the second medicine"
+            // Hide result panel temporarily to show camera
+            resultPanel.visibility = View.GONE
+            cameraPreview.visibility = View.VISIBLE
+            captureButton.isEnabled = true
         }
 
         zoomButton.setOnClickListener {
@@ -374,16 +402,50 @@ class MainActivity : AppCompatActivity() {
             val searchResult = medicineLookup.searchWithAmbiguity(text)
 
             withContext(Dispatchers.Main) {
+                // Handle second medicine scan for interaction check
+                if (isAddingSecondMedicine && searchResult.confirmed.isNotEmpty()) {
+                    val secondMedicine = searchResult.confirmed.first()
+                    scannedMedicines.add(secondMedicine)
+                    isAddingSecondMedicine = false
+
+                    // Show result panel for viewing
+                    resultPanel.visibility = View.VISIBLE
+                    cameraPreview.visibility = View.GONE
+                    captureButton.isEnabled = false
+
+                    val display = buildDisplayText(text, searchResult.confirmed, searchResult.tier2Results)
+                    resultText.text = display
+                    statusText.text = "Checking for interactions..."
+
+                    // Run drug interaction check
+                    if (scannedMedicines.size >= 2 && gemmaReady) {
+                        checkDrugInteraction(scannedMedicines[0], scannedMedicines[1])
+                    }
+                    return@withContext
+                }
+
+                // Normal first medicine flow
                 lastOcrText        = text
                 lastMedicines      = searchResult.confirmed
                 lastTier2Results   = searchResult.tier2Results
                 hasTier1A          = searchResult.confirmed.isNotEmpty()
+
+                // Add to scanned medicines if Tier 1A
+                if (hasTier1A && searchResult.confirmed.isNotEmpty()) {
+                    val med = searchResult.confirmed.first()
+                    if (scannedMedicines.none { it.genericName == med.genericName }) {
+                        scannedMedicines.add(med)
+                    }
+                }
 
                 // Show/hide "Ask a question" button based on Tier 1A presence
                 askQuestionButton.visibility = if (hasTier1A) View.VISIBLE else View.GONE
                 if (hasTier1A) {
                     askQuestionButton.contentDescription = if (currentLanguage == "hi") "प्रश्न पूछें" else "Ask a question"
                 }
+
+                // Show "Add another medicine" button if we have at least 1 medicine
+                btnAddMedicine.visibility = if (scannedMedicines.isNotEmpty()) View.VISIBLE else View.GONE
 
                 val display = buildDisplayText(text, searchResult.confirmed, searchResult.tier2Results)
                 resultText.text    = display
@@ -887,6 +949,78 @@ class MainActivity : AppCompatActivity() {
             ForegroundColorSpan(Color.parseColor("#757575")),
             start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
         )
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // DRUG INTERACTION CHECK (Task 6)
+    // ─────────────────────────────────────────────────────────
+
+    private fun checkDrugInteraction(med1: MedicineInfo, med2: MedicineInfo) {
+        cardInteraction.visibility = View.VISIBLE
+        tvInteractionTitle.text = "Analysing interaction with Gemma 4..."
+        tvInteractionVerdict.text = ""
+        tvInteractionReason.text = ""
+        tvInteractionWatchFor.text = ""
+        layoutInteractionBg.setBackgroundColor(Color.WHITE)
+
+        val prompt = ContextAssembler.buildInteractionPrompt(med1, med2)
+        val responseBuilder = StringBuilder()
+
+        gemmaReasoner?.reason(
+            prompt = prompt,
+            onToken = { token ->
+                responseBuilder.append(token)
+            },
+            onDone = {
+                runOnUiThread {
+                    parseAndDisplayInteraction(responseBuilder.toString())
+                }
+            },
+            onTimeout = {
+                runOnUiThread {
+                    tvInteractionTitle.text = "Interaction Check Timed Out"
+                    tvInteractionReason.text = "Please check manually with a doctor."
+                    layoutInteractionBg.setBackgroundColor(Color.parseColor("#FFEBEB"))
+                }
+            }
+        )
+    }
+
+    private fun parseAndDisplayInteraction(response: String) {
+        tvInteractionTitle.text = "Interaction Analysis"
+
+        // Parse the strict format: VERDICT, REASON, WATCH FOR
+        val verdictMatch = Regex("VERDICT:\\s*(.*)", RegexOption.IGNORE_CASE).find(response)?.groupValues?.get(1)?.trim() ?: "UNKNOWN"
+        val reasonMatch = Regex("REASON:\\s*(.*)", RegexOption.IGNORE_CASE).find(response)?.groupValues?.get(1)?.trim() ?: ""
+        val watchForMatch = Regex("WATCH FOR:\\s*(.*)", RegexOption.IGNORE_CASE).find(response)?.groupValues?.get(1)?.trim() ?: ""
+
+        tvInteractionVerdict.text = "Verdict: $verdictMatch"
+        tvInteractionReason.text = "Reason: $reasonMatch"
+        tvInteractionWatchFor.text = "Watch For: $watchForMatch"
+
+        // Dynamic Styling (The WOW factor)
+        when {
+            verdictMatch.contains("NO", ignoreCase = true) -> {
+                layoutInteractionBg.setBackgroundColor(Color.parseColor("#FFEBEB")) // Light Red
+                tvInteractionVerdict.setTextColor(Color.RED)
+                tvInteractionTitle.text = "DANGEROUS COMBINATION"
+            }
+            verdictMatch.contains("CONSULT DOCTOR", ignoreCase = true) -> {
+                layoutInteractionBg.setBackgroundColor(Color.parseColor("#FFF3E0")) // Light Orange
+                tvInteractionVerdict.setTextColor(Color.parseColor("#F57C00")) // Orange
+                tvInteractionTitle.text = "CONSULT YOUR DOCTOR"
+            }
+            verdictMatch.contains("SAFE", ignoreCase = true) -> {
+                layoutInteractionBg.setBackgroundColor(Color.parseColor("#E8F5E9")) // Light Green
+                tvInteractionVerdict.setTextColor(Color.parseColor("#2E7D32")) // Dark Green
+                tvInteractionTitle.text = "SAFE TO COMBINE"
+            }
+            else -> {
+                layoutInteractionBg.setBackgroundColor(Color.parseColor("#F5F5F5")) // Gray
+                tvInteractionVerdict.setTextColor(Color.GRAY)
+                tvInteractionTitle.text = "Analysis Complete"
+            }
+        }
     }
 
     override fun onDestroy() {

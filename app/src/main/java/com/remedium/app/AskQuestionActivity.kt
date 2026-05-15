@@ -43,6 +43,8 @@ class AskQuestionActivity : Activity() {
     private var medicineSchedule: String = ""
     private var medicinePregnancy: String = ""
     private var medicineContra: String = ""
+    private var medicineAlcohol: Boolean = false
+    private var medicineSideEffects: String = ""
     private var currentLanguage: String = "en"
     private var gemmaReady: Boolean = false
     private var gemmaReasoner: GemmaReasoner = GemmaReasoner.getInstance(this)
@@ -70,6 +72,8 @@ class AskQuestionActivity : Activity() {
         medicineSchedule = intent.getStringExtra("medicineSchedule") ?: ""
         medicinePregnancy = intent.getStringExtra("medicinePregnancy") ?: ""
         medicineContra = intent.getStringExtra("medicineContra") ?: ""
+        medicineAlcohol = intent.getBooleanExtra("medicineAlcohol", false)
+        medicineSideEffects = intent.getStringExtra("medicineSideEffects") ?: ""
         currentLanguage = intent.getStringExtra("language") ?: "en"
         gemmaReady = intent.getBooleanExtra("gemmaReady", false)
         ttsReady = intent.getBooleanExtra("ttsReady", false)
@@ -360,6 +364,8 @@ class AskQuestionActivity : Activity() {
             if (medicineSchedule.isNotBlank()) appendLine("SCHEDULE: $medicineSchedule")
             if (medicinePregnancy.isNotBlank()) appendLine("PREGNANCY_CAT: $medicinePregnancy")
             if (medicineContra.isNotBlank()) appendLine("CONTRAINDICATIONS: $medicineContra")
+            if (medicineAlcohol) appendLine("ALCOHOL: dangerous - avoid while taking this medicine")
+            if (medicineSideEffects.isNotBlank()) appendLine("SIDE_EFFECTS: $medicineSideEffects")
         }
 
         val prompt = """
@@ -485,6 +491,8 @@ QUESTION: $question
                 putExtra("medicineSchedule", medicine.legalSchedule ?: "")
                 putExtra("medicinePregnancy", medicine.fdaPregnancyCat ?: "")
                 putExtra("medicineContra", medicine.contraindications ?: "")
+                putExtra("medicineAlcohol", medicine.alcoholWarning)
+                putExtra("medicineSideEffects", medicine.sideEffects ?: "")
                 putExtra("language", language)
                 putExtra("gemmaReady", gemmaReady)
                 putExtra("ttsReady", ttsReady)
