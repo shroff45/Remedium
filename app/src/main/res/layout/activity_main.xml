@@ -118,21 +118,18 @@
 
         </ScrollView>
 
-        <Button
+        <com.google.android.material.floatingactionbutton.FloatingActionButton
             android:id="@+id/askQuestionButton"
-            android:layout_width="match_parent"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Ask a question"
-            android:textSize="16sp"
-            android:textColor="#FFFFFF"
+            android:layout_margin="16dp"
+            android:src="@android:drawable/ic_menu_send"
+            android:contentDescription="Ask a question"
             android:backgroundTint="#FF9800"
-            android:padding="12dp"
-            android:layout_marginStart="20dp"
-            android:layout_marginEnd="20dp"
-            android:layout_marginBottom="8dp"
+            app:tint="#FFFFFF"
             android:visibility="gone"
+            app:fabSize="normal"
             app:layout_constraintBottom_toTopOf="@id/speakButton"
-            app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent" />
 
         <Button

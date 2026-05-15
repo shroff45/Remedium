@@ -21,6 +21,8 @@ import android.text.style.StyleSpan
 import android.util.Log
 import android.view.View
 import android.widget.Button
+import com.google.android.material.floatingactionbutton.FloatingActionButton
+import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
@@ -53,11 +55,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var imageCapture: ImageCapture
     private lateinit var resultPanel: ConstraintLayout
     private lateinit var resultText: TextView
+    private lateinit var resultScroll: ScrollView
     private lateinit var scanAgainButton: Button
     private lateinit var languageToggleButton: Button
     private lateinit var speakButton: Button
     private lateinit var zoomButton: Button
-    private lateinit var askQuestionButton: Button
+    private lateinit var askQuestionButton: FloatingActionButton
     private lateinit var medicineLookup: MedicineLookup
     private var gemmaReasoner: GemmaReasoner? = null
     private var gemmaReady = false
@@ -94,6 +97,7 @@ class MainActivity : AppCompatActivity() {
         captureButton         = findViewById(R.id.captureButton)
         resultPanel           = findViewById(R.id.resultPanel)
         resultText            = findViewById(R.id.resultText)
+        resultScroll          = findViewById(R.id.resultScroll)
         scanAgainButton       = findViewById(R.id.scanAgainButton)
         languageToggleButton  = findViewById(R.id.languageToggleButton)
         speakButton           = findViewById(R.id.speakButton)
@@ -103,7 +107,7 @@ class MainActivity : AppCompatActivity() {
         medicineLookup = MedicineLookup(this)
 
         // Initialize Gemma 4 reasoner
-        gemmaReasoner = GemmaReasoner(this)
+        gemmaReasoner = GemmaReasoner.getInstance(this)
         gemmaReasoner!!.initAsync(
             onReady = {
                 gemmaReady = true
@@ -139,7 +143,7 @@ class MainActivity : AppCompatActivity() {
             setTtsLanguage()
             // Update ask question button text if visible
             if (askQuestionButton.visibility == View.VISIBLE) {
-                askQuestionButton.text = if (currentLanguage == "hi") "\u092A\u094D\u0930\u0936\u094D\u0928 \u092A\u0942\u091B\u0947\u0902" else "Ask a question"
+                askQuestionButton.contentDescription = if (currentLanguage == "hi") "\u092A\u094D\u0930\u0936\u094D\u0928 \u092A\u0942\u091B\u0947\u0902" else "Ask a question"
             }
             if (resultPanel.visibility == View.VISIBLE) {
                 rebuildCurrentResult()
@@ -378,7 +382,7 @@ class MainActivity : AppCompatActivity() {
                 // Show/hide "Ask a question" button based on Tier 1A presence
                 askQuestionButton.visibility = if (hasTier1A) View.VISIBLE else View.GONE
                 if (hasTier1A) {
-                    askQuestionButton.text = if (currentLanguage == "hi") "प्रश्न पूछें" else "Ask a question"
+                    askQuestionButton.contentDescription = if (currentLanguage == "hi") "प्रश्न पूछें" else "Ask a question"
                 }
 
                 val display = buildDisplayText(text, searchResult.confirmed, searchResult.tier2Results)
@@ -412,80 +416,15 @@ class MainActivity : AppCompatActivity() {
 
     private fun showQuestionDialog() {
         val med = lastMedicines.firstOrNull() ?: return
-        val medName = med.genericName ?: "medicine"
-        val title = if (currentLanguage == "hi")
-            "$medName के बारे में पूछें"
-        else
-            "Ask about $medName"
-        val hint = if (currentLanguage == "hi") "आपका प्रश्न..." else "Your question..."
-        val submit = if (currentLanguage == "hi") "भेजें" else "Ask"
 
-        val editText = EditText(this).apply {
-            setHint(hint)
-            setPadding(48, 32, 48, 32)
-            textSize = 16f
-        }
-
-        AlertDialog.Builder(this)
-            .setTitle(title)
-            .setView(editText)
-            .setPositiveButton(submit) { _, _ ->
-                val question = editText.text.toString().trim()
-                if (question.isNotEmpty()) {
-                    runGemmaQuery(med, question)
-                }
-            }
-            .setNegativeButton(if (currentLanguage == "hi") "रद्द करें" else "Cancel", null)
-            .show()
-    }
-
-    private fun runGemmaQuery(med: MedicineInfo, question: String) {
-        statusText.text = if (currentLanguage == "hi")
-            "Gemma 4 सोच रहा है..." else "Gemma 4 is reasoning..."
-        askQuestionButton.isEnabled = false
-        resultText.text = ""
-
-        val prompt = ContextAssembler.buildGroundedPrompt(
-            medicines = listOf(med),
-            userQuestion = question,
-            isPregnant = false,
-            ageGroup = "adult"
+        val intent = AskQuestionActivity.createIntent(
+            context = this,
+            medicine = med,
+            language = currentLanguage,
+            gemmaReady = gemmaReady,
+            ttsReady = ttsReady
         )
-
-        val responseBuilder = StringBuilder()
-
-        gemmaReasoner?.reason(
-            prompt = prompt,
-            onToken = { token ->
-                responseBuilder.append(token)
-                runOnUiThread {
-                    resultText.text = responseBuilder.toString()
-                }
-            },
-            onDone = {
-                runOnUiThread {
-                    val fullResponse = responseBuilder.toString()
-                    statusText.text = if (currentLanguage == "hi")
-                        "पूर्ण" else "Done"
-
-                    // Read response aloud via TTS
-                    if (ttsReady && fullResponse.isNotBlank()) {
-                        tts.speak(fullResponse, TextToSpeech.QUEUE_FLUSH, null, "gemma_response")
-                    }
-
-                    askQuestionButton.isEnabled = true
-                }
-            },
-            onTimeout = {
-                runOnUiThread {
-                    val timeoutMsg = if (currentLanguage == "hi")
-                        "समय समाप्त। कृपया पुनः प्रयास करें।" else "Timed out. Please try again."
-                    statusText.text = timeoutMsg
-                    resultText.text = timeoutMsg
-                    askQuestionButton.isEnabled = true
-                }
-            }
-        )
+        startActivity(intent)
     }
 
     private fun showScheduleH1Dialog() {

@@ -25,10 +25,21 @@ import java.util.concurrent.atomic.AtomicBoolean
  * - 15 second hard timeout prevents runaway inference
  * - If engine fails to load, onTimeout() is called (not crash)
  */
-class GemmaReasoner(private val context: Context) {
+class GemmaReasoner private constructor(private val context: Context) {
 
     private var engine: Engine? = null
     var isReady = false
+
+    companion object {
+        @Volatile
+        private var instance: GemmaReasoner? = null
+
+        fun getInstance(context: Context): GemmaReasoner {
+            return instance ?: synchronized(this) {
+                instance ?: GemmaReasoner(context.applicationContext).also { instance = it }
+            }
+        }
+    }
 
     private val TAG = "GemmaReasoner"
 
@@ -36,8 +47,8 @@ class GemmaReasoner(private val context: Context) {
     // TODO Day 4: add assets copy for production APK
     private val modelPath = "/data/local/tmp/gemma.litertlm"
 
-    // 15 second hard timeout on inference
-    private val inferenceTimeoutMs = 15_000L
+    // 45 second timeout - balance for rural devices but not too long
+    private val inferenceTimeoutMs = 45_000L
 
     // Flag to track timeout state
     private val timedOut = AtomicBoolean(false)
