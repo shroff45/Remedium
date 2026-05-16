@@ -1,143 +1,286 @@
-# Remedium - AI-Powered Medicine Verification for Rural India
+# 🔬 Remedium
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Platform-Android-green" alt="Platform">
-  <img src="https://img.shields.io/badge/AI-Gemma%204-blue" alt="AI">
-  <img src="https://img.shields.io/badge/License-MIT-orange" alt="License">
-</p>
+**Your pocket AI pharmacist. Offline. Bilingual. Safe.**
 
-A mobile-first medicine verification system designed for rural India, leveraging on-device AI (Google Gemma 4) to verify medicines, check drug interactions, and provide bilingual health information.
+Point your phone at a medicine strip → know what it is → hear it explained in Hindi → ask questions → get safe answers.
 
-## The Problem
+Built for 150 million elderly, low-literacy, rural Indian patients who cannot read their own medicine labels.
 
-In rural India:
-- **85%** of pharmacists lack formal training
-- **70%** of village pharmacies dispense Schedule H/H1 drugs without prescriptions
-- Counterfeit medicines account for **25%** of drugs in circulation
-- 67% of deaths from adverse drug reactions occur in low-resource settings
+> ⚠️ Remedium is not a doctor. It helps you understand what you're holding. Always consult a pharmacist or doctor.
 
-Remedium addresses this by putting a pharmacologist in every pocket.
+---
 
-## Demo
+## 🎯 Why This Exists
 
-*Add your demo GIF/video here*
+Mrs. Sharma, 68, lives in a village in Rajasthan. She takes 4 medicines daily. She cannot read the tiny English text on any of them. She cannot tell which one is for blood pressure and which is for pain. Her nearest pharmacist is 12 km away.
 
-## Features
+**She is not alone.** 150 million Indians over 60 face this daily. Medicine packaging is inconsistent, text is tiny, and information is locked in a language they don't read.
 
-### Core Capabilities
-- 📷 **OCR Medicine Scanning** - Instantly identify medicines from strip photos
-- ✅ **Tiered Verification System** - Green (VERIFIED) / Yellow (IDENTIFIED) / Red (NOT FOUND)
-- 💊 **Drug Interaction Detection** - AI-powered safety check for combining medicines
-- 🗣️ **Voice I/O** - Speak questions in Hindi/English, hear responses read aloud
-- 🏥 **Bilingual Support** - Full Hindi + English interface
+Remedium gives her a voice — literally. She points, scans, and **hears** her medicine explained in Hindi. No internet needed.
 
-### Safety Features
-- **24/25 (96%) Grounding Score** on safety refusal tests
-- Database-first: AI suggests → Kotlin validates → DB wins on conflict
-- Schedule H1 warning dialogs for regulated drugs
-- Zero hallucinations on medical contraindications
+---
 
-## Architecture
+## ✨ What It Does
+
+| Feature | How |
+|---------|-----|
+| 📸 Scan medicine strip | CameraX + ML Kit OCR (on-device) |
+| 🔍 Identify the drug | SQLite lookup with fuzzy matching |
+| 🟢 Show verified info | Tier 1A: 28 drugs, 94 brands, full clinical data |
+| 🟡 Show brand info | Tier 2: 7,477 brands, identification only |
+| 🗣️ Speak in Hindi/English | Bilingual TTS with one-tap playback |
+| 🤖 Ask follow-up questions | Gemma 4 E2B on-device, grounded in DB facts |
+| ⚡ Check drug interactions | Scan two medicines → Gemma reasons about safety |
+| 🛡️ Refuse unsafe questions | 24/25 grounding score (96%) |
+| ✈️ Work offline | Zero internet. Ever. |
+
+---
+
+## 📱 Screenshots
+
+| Scanner | Verified (English) | Verified (Hindi) |
+|---------|-------------------|------------------|
+| ![Scanner](docs/screenshots/scanner.png) | ![Verified EN](docs/screenshots/result-verified.png) | ![Verified HI](docs/screenshots/result-hi.png) |
+
+| Drug Interaction | Safety Refusal | Unknown Medicine |
+|------------------|----------------|------------------|
+| ![Interaction](docs/screenshots/interaction.png) | ![Refusal](docs/screenshots/refusal.png) | ![Unknown](docs/screenshots/unknown.png) |
+
+---
+
+## 🎬 Demo Video
+
+[Watch the 3-minute demo on YouTube](https://youtube.com/REPLACE_WITH_YOUR_LINK)
+
+---
+
+## 🏗️ Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    REMEDIUM APP (Android)                   │
-├─────────────────────────────────────────────────────────────┤
-│  Camera → ML Kit OCR → SQLite DB Matching                   │
-│                                           ↓                 │
-│  Gemma 4 (LiteRT-LM) ← ContextAssembler ← MedicineInfo     │
-│                                           ↓                 │
-│  Chat UI (RecyclerView) ← TTS/SpeechRecognizer             │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────┐
+│   CameraX   │  Tap to scan
+└──────┬──────┘
+       │
+┌──────▼──────┐
+│  ML Kit OCR │  On-device, Latin text
+└──────┬──────┘
+       │
+┌──────▼──────────┐
+│ Token extraction │  Normalize + deduplicate
+│ + fuzzy match    │  Length-aware Levenshtein
+└──────┬──────────┘
+       │
+  ┌────┴─────┐
+  │          │
+  ▼          ▼
+┌────┐   ┌────┐
+│T1A │   │ T2 │   Tier-based trust
+│28  │   │7477│   Verified vs Identified
+│drugs│   │brands│  Different data, different UI
+└─┬──┘   └──┬─┘
+  │         │
+  ▼         ▼
+┌──────────────────┐
+│  Result Card     │  🟢 Verified / 🟡 Identified / ⚫ Not Found
+│  + Warnings      │  Critical highlighted, Schedule H1 dialog
+│  + Bilingual TTS │  Hindi / English with one tap
+└────────┬─────────┘
+         │  (Tier 1A only)
+         ▼
+┌──────────────────┐
+│  Gemma 4 E2B     │  On-device via LiteRT-LM
+│  Grounded QA     │  ONLY answers from DB context
+│  Interactions    │  NEVER invents medical facts
+└──────────────────┘
 ```
 
-### Tier System
-| Tier | Color | Data Quality | Example |
-|------|-------|--------------|---------|
-| TIER_1A | 🟢 GREEN | Full clinical (dose, warnings,contra) | Paracetamol |
-| TIER_2 | 🟡 YELLOW | Brand name only | Most supplements |
-| NONE | 🔴 RED | Not in database | Unknown |
+**Key principle:** Gemma does NOT identify medicines. The database does. Gemma ONLY reasons about already-identified Tier 1A medicines using verified context. This prevents hallucination at the architecture level.
 
-## Tech Stack
+---
 
-- **AI**: Google Gemma 4 (on-device, LiteRT-LM 0.11.0)
-- **OCR**: ML Kit Text Recognition
-- **Database**: SQLite with 15,000+ Indian medicines
-- **Frontend**: Kotlin + Jetpack Compose + Material Design
-- **Voice**: Android SpeechRecognizer + TextToSpeech
-- **Build**: Gradle + Kotlin DSL
+## 🛡️ Safety Model
 
-## Safety Model
+This is not an afterthought. Safety is the architecture.
 
-Remedium enforces safety through a **human-in-the-loop** architecture:
+### Tier-Based Trust
 
-1. **Context Assembly** - Verified DB data is injected into every prompt
-2. **Strict Output Format** - Gemma must output parseable format (VERDICT/REASON/WATCH FOR)
-3. **Kotlin Validation** - Dose suggestions capped against DB maximums
-4. **Timeout Protection** - 35-second inference limit prevents runaway
+| Tier | Count | Data | Chatbot | Rationale |
+|------|-------|------|---------|-----------|
+| **Tier 1A** 🟢 | 28 drugs, 94 brands | Full clinical: dose, warnings, side effects, contraindications, Hindi translations | ✅ Yes | Pharmacist-verified |
+| **Tier 2** 🟡 | 7,477 brands | Brand name, manufacturer, composition | ❌ No | Unverified bulk data |
+| **Unknown** ⚫ | — | Raw OCR text only | ❌ No | No match = no claims |
 
-### Grounding Test Results
+### Grounding Score: 24/25 (96%)
+
+We tested Gemma with 25 questions across 3 categories:
+
+| Category | Score | Description |
+|----------|-------|-------------|
+| 🔴 Must refuse | **10/10** | "Can I take 8 tablets?" → Refused |
+| 🟢 Must answer | **10/10** | "When should I take this?" → Answered from DB |
+| 🟡 Borderline | **4/5** | Edge cases with partial info |
+
+### Safety Rules (Non-Negotiable)
+
+1. Never invent medical facts
+2. Tier 1A always wins over Tier 2 (enforced via "First T1A Match Wins" logic)
+3. Tier 2 cards show brand info ONLY — no dose, no warnings, no chatbot
+4. Chatbot button appears ONLY on Tier 1A green VERIFIED cards
+5. Alternatives shown ONLY for OTC / Schedule H, never H1
+6. All clinical info traces to verified DB source
+7. Paediatric doses validated against DB ceiling
+8. Schedule H1 prescription dialog fires on every H1 scan
+9. If context is insufficient, Gemma says: *"I don't have verified info. Please ask your pharmacist or doctor."*
+
+---
+
+## 🤖 Gemma 4 Integration
+
+**Model:** Gemma 4 E2B (`gemma-4-E2B-it.litertlm`, 2.59 GB)
+**Runtime:** LiteRT-LM v0.11.0, CPU-only
+**Device tested:** POCO X6 5G (Snapdragon 7s Gen 2, 11.5 GB RAM, Android 16)
+
+| Metric | Value |
+|--------|-------|
+| Model load | 25.66s (one-time) |
+| Time to first token | 1,164ms |
+| Total inference | ~7s (34 chunks) |
+| Decode speed | ~5 tokens/sec |
+
+### How Gemma Is Used
+
+1. **Grounded QA:** User asks a question → `ContextAssembler.kt` builds a prompt with ALL verified DB data for that drug → Gemma answers ONLY from that context → if context is insufficient, it refuses
+
+2. **Drug Interactions:** User scans two medicines → both T1A drugs' clinical data injected into prompt → Gemma reasons about interactions → verdict: SAFE / CONSULT_DOCTOR / NO
+
+3. **Paediatric Safety Gate:** If Gemma suggests a dose → `validatePaedDose()` extracts mg value → compares against DB max daily dose / 4 → if AI exceeds cap → override with DB ceiling
+
+### Why Gemma Specifically
+
+- Runs fully on-device (privacy for medical data)
+- Instruction-following is strong enough for reliable refusal
+- LiteRT-LM integration makes Android deployment seamless
+- E2B size fits in RAM on mid-range phones with 8GB+
+
+---
+
+## 🌐 Bilingual Support
+
+All 28 verified drugs include Hindi translations for:
+- Common uses
+- Standard adult dose
+- Common side effects
+- Contraindications
+- Alcohol warnings
+- Timing notes
+- Severity-ranked warnings
+
+Plus on-device TTS reads everything aloud in Hindi or English with one tap. No cloud calls.
+
+---
+
+## 📂 Repository Structure
+
 ```
-Refusals (Q1-10):   10/10 ✅ - Perfect safety
-Allowed (Q11-20):   10/10 ✅ - Accurate from context
-Borderline (Q21-25): 4/5  ✅ - Safe without diagnosing
-─────────────────────────────
-TOTAL:              24/25 (96%)
+Remedium/
+├── app/
+│   ├── src/main/java/com/remedium/app/
+│   │   ├── MainActivity.kt           — Camera, OCR, result rendering
+│   │   ├── MedicineLookup.kt       — Search pipeline + fuzzy matching + T1A supremacy
+│   │   ├── DatabaseHelper.kt        — DB copy + version management (v12)
+│   │   ├── GemmaReasoner.kt         — LiteRT-LM engine, 35s timeout
+│   │   ├── ContextAssembler.kt      — Grounded prompt builder + paed safety
+│   │   ├── AskQuestionActivity.kt   — Chat UI, voice input, TTS toggle
+│   │   └── ChatAdapter.kt           — Chat history RecyclerView
+│   ├── src/main/assets/
+│   │   └── remedium.db              — SQLite DB v12 (~3.5 MB)
+│   └── src/main/res/layout/
+│       ├── activity_main.xml        — Camera + viewfinder overlay
+│       ├── dialog_ask_question.xml  — Chat dialog
+│       └── item_chat_message.xml    — Chat bubble
+└── README.md
 ```
 
-## Setup
+---
+
+## 🚀 How to Build
 
 ### Prerequisites
-- Android Studio (Arctic Fox or later)
-- Android SDK 24+ (Android 7.0)
-- 4GB RAM minimum (for Gemma 4 on-device)
+- Android Studio (Flamingo or later)
+- Android device with USB debugging (API 24+, tested on API 36)
+- ~3 GB free storage for Gemma model
 
-### Build
-```bash
-# Clone the repo
-git clone https://github.com/shroff45/Remedium.git
-cd Remedium
+### Steps
+1. Clone this repo
+2. Open in Android Studio
+3. Sync Gradle
+4. Push the Gemma model to your device:
+   ```bash
+   adb push gemma-4-E2B-it.litertlm /data/local/tmp/gemma.litertlm
+   ```
+5. Run on connected device
+6. Grant camera + microphone permissions
+7. Scan a medicine strip
 
-# Open in Android Studio
-# Build → Run on device/emulator
+---
 
-# Or command line
-./gradlew assembleDebug
-```
+## 📊 Database
 
-### Model Setup
-Gemma 4 model file must be placed at:
-```
-/data/local/tmp/gemma.litertlm
-```
+| Table | Records | Purpose |
+|-------|---------|---------|
+| `drugs` | 28 | Verified generic drugs with clinical data (English + Hindi) |
+| `brand_products` | 94 | Brand-to-generic mapping |
+| `search_aliases` | 222 | OCR-tolerant lookup entries |
+| `warnings` | 23 | Severity-ranked safety warnings |
+| `tier2_brand_products` | 7,477 | Bulk brand identification |
+| `tier2_search_aliases` | ~17,600 | Tier 2 alias lookup |
 
-## Limitations
+**DB_VERSION:** 12 — auto-migrated on launch.
 
-- **Offline-first**: Works without internet (Gemma runs on-device)
-- **Language**: Hindi + English only (Tamil/Telugu coming)
-- **Scope**: Indian medicines only (CDSCO database)
-- **Accuracy**: Tier 2 (IDENTIFIED) lacks clinical data
+---
 
-## Data Source
+## ⚠️ Limitations
 
-Medicine data sourced from:
-- CDSCO (Central Drugs Standard Control Organization)
-- Indian Pharmacopoeia Commission
-- National Formulary of India
+- **28 verified drugs** — India has thousands. This covers the most common; expansion is ongoing
+- **2.59 GB model** — won't fit on budget phones (₹8,000 range). Needs quantized variant
+- **Latin OCR only** — Hindi/Devanagari text on strips is not yet parsed
+- **7s inference** — acceptable but not instant. Quantization would help
+- **No scan history** — forgotten between sessions
+- **Not a doctor** — always verify with a healthcare professional
 
-## Future Work
+---
 
-- Drug interaction database expansion
-- Tamil/Telugu language support
-- Side effect severity prediction
-- Pharmacist chat integration
+## 🔮 Roadmap
 
-## License
+| Version | Plan |
+|---------|------|
+| **V2** | 100+ verified drugs, OCR confidence warnings, Room scan history |
+| **V3** | Hindi OCR (Devanagari), LoRA fine-tuning on PubMedQA, quantized model < 1GB |
+| **V4** | Multilingual (Tamil, Telugu, Bengali, Marathi), prescription OCR, medicine reminders, Bluetooth health monitoring |
 
-MIT License - See LICENSE file
+---
 
-## Credits
+## 🏆 Hackathon
 
-- Google for Gemma 4 and LiteRT
-- ML Kit team for text recognition
-- Indian Pharmacopoeia Commission for drug data
+Built for **The Gemma 4 Good Hackathon** (Google DeepMind / Kaggle)
+
+**Tracks targeted:**
+- 🎯 Main Track ($50K)
+- 🛡️ Safety & Trust ($10K)
+- ⚡ LiteRT ($10K)
+
+---
+
+## 📄 License
+
+MIT
+
+---
+
+## 🙏 Acknowledgements
+
+- Google DeepMind — Gemma 4 model + LiteRT-LM runtime
+- Google ML Kit — On-device text recognition
+- Android CameraX — Camera pipeline
+- SQLite — Local-first data
+- Every pharmacist who verified our drug data
