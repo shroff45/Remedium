@@ -21,6 +21,7 @@ import android.text.style.StyleSpan
 import android.util.Log
 import android.view.View
 import android.widget.Button
+import android.widget.FrameLayout
 import com.google.android.material.floatingactionbutton.FloatingActionButton
 import android.widget.ScrollView
 import android.widget.TextView
@@ -70,6 +71,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvInteractionVerdict: TextView
     private lateinit var tvInteractionReason: TextView
     private lateinit var tvInteractionWatchFor: TextView
+    private lateinit var viewfinderOverlay: FrameLayout
     private lateinit var medicineLookup: MedicineLookup
     private var gemmaReasoner: GemmaReasoner? = null
     private var gemmaReady = false
@@ -111,6 +113,8 @@ class MainActivity : AppCompatActivity() {
         resultScroll          = findViewById(R.id.resultScroll)
         scanAgainButton       = findViewById(R.id.scanAgainButton)
         languageToggleButton  = findViewById(R.id.languageToggleButton)
+        // Set initial language toggle button text based on current language
+        languageToggleButton.text = if (currentLanguage == "hi") "EN" else "हिं"
         speakButton           = findViewById(R.id.speakButton)
         zoomButton            = findViewById(R.id.zoomButton)
         askQuestionButton    = findViewById(R.id.askQuestionButton)
@@ -121,6 +125,7 @@ class MainActivity : AppCompatActivity() {
         tvInteractionVerdict = findViewById(R.id.tvInteractionVerdict)
         tvInteractionReason = findViewById(R.id.tvInteractionReason)
         tvInteractionWatchFor = findViewById(R.id.tvInteractionWatchFor)
+        viewfinderOverlay = findViewById(R.id.viewfinderOverlay)
 
         medicineLookup = MedicineLookup(this)
 
@@ -152,10 +157,10 @@ class MainActivity : AppCompatActivity() {
         languageToggleButton.setOnClickListener {
             if (currentLanguage == "en") {
                 currentLanguage = "hi"
-                languageToggleButton.text = "EN"
+                languageToggleButton.text = "\u0939\u093F\u0902"
             } else {
                 currentLanguage = "en"
-                languageToggleButton.text = "\u0939\u093F\u0902"
+                languageToggleButton.text = "EN"
             }
             prefs.edit().putString("language", currentLanguage).apply()
             setTtsLanguage()
@@ -195,6 +200,7 @@ class MainActivity : AppCompatActivity() {
             statusText.text = "Scan the second medicine"
             // Hide result panel temporarily to show camera
             resultPanel.visibility = View.GONE
+            viewfinderOverlay.visibility = View.VISIBLE
             cameraPreview.visibility = View.VISIBLE
             captureButton.isEnabled = true
         }
@@ -412,6 +418,7 @@ class MainActivity : AppCompatActivity() {
                     resultPanel.visibility = View.VISIBLE
                     cameraPreview.visibility = View.GONE
                     captureButton.isEnabled = false
+                    viewfinderOverlay.visibility = View.GONE
 
                     val display = buildDisplayText(text, searchResult.confirmed, searchResult.tier2Results)
                     resultText.text = display
@@ -450,6 +457,7 @@ class MainActivity : AppCompatActivity() {
                 val display = buildDisplayText(text, searchResult.confirmed, searchResult.tier2Results)
                 resultText.text    = display
                 resultPanel.visibility = View.VISIBLE
+                viewfinderOverlay.visibility = View.GONE
                 statusText.text    = "Camera ready. Tap Scan."
                 captureButton.isEnabled = true
 
@@ -468,6 +476,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun hideResultPanel() {
         resultPanel.visibility = View.GONE
+        viewfinderOverlay.visibility = View.VISIBLE
         statusText.text = "Camera ready. Tap Scan."
         if (::tts.isInitialized) tts.stop()
     }
@@ -633,13 +642,15 @@ class MainActivity : AppCompatActivity() {
             sb.append("\n")
             val label = if (currentLanguage == "hi") "\u0915\u093F\u0938 \u0915\u093E\u092E \u0906\u0924\u0940 \u0939\u0948:\n" else "What it is for:\n"
             appendBold(sb, label)
-            sb.append(med.uses).append("\n")
+            val usesText = if (currentLanguage == "hi" && !med.usesHi.isNullOrBlank()) med.usesHi else med.uses
+            sb.append(usesText).append("\n")
         }
         if (!med.dose.isNullOrBlank()) {
             sb.append("\n")
             val raw  = template?.doseLabel
                 ?: if (currentLanguage == "hi") "\u0938\u093E\u092E\u093E\u0928\u094D\u092F \u0916\u0941\u0930\u093E\u0915: {DOSE}" else "Usual adult dose: {DOSE}"
-            val text = raw.replace("{DOSE}", med.dose)
+            val doseText = if (currentLanguage == "hi" && !med.doseHi.isNullOrBlank()) med.doseHi else med.dose
+            val text = raw.replace("{DOSE}", doseText)
             appendBold(sb, text)
             sb.append("\n")
         }
@@ -675,7 +686,8 @@ class MainActivity : AppCompatActivity() {
             sb.append("\n")
             val label = if (currentLanguage == "hi") "\u0938\u093E\u092E\u093E\u0928\u094D\u092F \u0926\u0941\u0937\u094D\u092A\u094D\u0930\u092D\u093E\u0935:\n" else "Common side effects:\n"
             appendBold(sb, label)
-            sb.append(med.sideEffects).append("\n")
+            val sideEffectsText = if (currentLanguage == "hi" && !med.sideEffectsHi.isNullOrBlank()) med.sideEffectsHi else med.sideEffects
+            sb.append(sideEffectsText).append("\n")
         }
         if (med.highWarnings.isNotEmpty()) {
             sb.append("\n")
@@ -697,7 +709,8 @@ class MainActivity : AppCompatActivity() {
             sb.append("\n")
             val label = if (currentLanguage == "hi") "\u0907\u0928\u094D\u0939\u0947\u0902 \u0928 \u0932\u0947\u0902 \u0905\u0917\u0930:\n" else "Do NOT take if:\n"
             appendBold(sb, label)
-            sb.append(med.contraindications).append("\n")
+            val contraText = if (currentLanguage == "hi" && !med.contraindicationsHi.isNullOrBlank()) med.contraindicationsHi else med.contraindications
+            sb.append(contraText).append("\n")
         }
 
         // ── Alternative brands ← NEW (Part 3) ────────────────

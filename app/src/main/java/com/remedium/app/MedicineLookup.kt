@@ -32,15 +32,20 @@ data class MedicineInfo(
     val drugClass: String?,
     val category: String?,
     val uses: String?,
+    val usesHi: String?,         // Hindi translation
     val dose: String?,
+    val doseHi: String?,         // Hindi translation
     val maxDose: String?,
     val timingNote: String?,
     val timingNoteHi: String?,
     val alcoholWarning: Boolean,
+    val alcoholWarningHi: String?, // Hindi translation
     val legalSchedule: String?,
     val fdaPregnancyCat: String?,
     val contraindications: String?,
+    val contraindicationsHi: String?, // Hindi translation
     val sideEffects: String?,
+    val sideEffectsHi: String?,    // Hindi translation
     val criticalWarnings: List<WarningItem>,
     val highWarnings: List<WarningItem>,
     val mediumWarnings: List<WarningItem>,
@@ -103,11 +108,17 @@ class MedicineLookup(context: Context) {
 
     fun searchWithAmbiguity(ocrText: String): SearchResult {
         val tokens = extractTokens(ocrText)
+        Log.d("RemediumSearch", "=== TOKEN LIST: ${tokens.joinToString(", ")} ===")
         val confirmed = mutableListOf<MedicineInfo>()
         val ambiguousSets = mutableListOf<List<MedicineInfo>>()
         val tier2Results = mutableListOf<Tier2Info>()   // ← NEW
         val seenGenerics = mutableSetOf<String>()
         val seenTier2Brands = mutableSetOf<String>()    // ← NEW: dedup Tier 2 hits
+
+        // Track first T1A match for "first match wins" logic
+        var firstT1AMatch: MedicineInfo? = null
+        var firstT1AToken: String? = null
+
         val db = helper.openDb()
 
         try {
@@ -129,18 +140,44 @@ class MedicineLookup(context: Context) {
 
                     if (distinctGenerics == 1) {
                         val best = resolved.first()
-                        confirmed.add(best)
-                        seenGenerics.add(best.genericName)
+
+                        // ── FIRST T1A MATCH WINS ──
+                        // If we already have a T1A match, skip additional matches
+                        // This prevents excipients like "Iron" or "Magnesium" from
+                        // adding false positives when the actual drug was already found
+                        if (firstT1AMatch == null) {
+                            firstT1AMatch = best
+                            firstT1AToken = token
+                            confirmed.add(best)
+                            seenGenerics.add(best.genericName)
+                        } else {
+                            Log.d("RemediumSearch", "Skipping T1A '$token' - first match was '$firstT1AToken'")
+                        }
                     } else {
                         if (ambiguousByText) {
                             val representatives = byGeneric.values.map { it.first() }
+                            // Only add if we don't have a first match yet
+                            if (firstT1AMatch == null && representatives.isNotEmpty()) {
+                                val first = representatives.first()
+                                firstT1AMatch = first
+                                firstT1AToken = token
+                                confirmed.add(first)
+                                seenGenerics.add(first.genericName)
+                            }
                             ambiguousSets.add(representatives)
                             for (r in representatives) seenGenerics.add(r.genericName)
                         } else {
                             for (r in resolved.distinctBy { it.genericName }) {
                                 if (r.genericName !in seenGenerics) {
-                                    confirmed.add(r)
-                                    seenGenerics.add(r.genericName)
+                                    // ── FIRST T1A MATCH WINS ──
+                                    if (firstT1AMatch == null) {
+                                        firstT1AMatch = r
+                                        firstT1AToken = token
+                                        confirmed.add(r)
+                                        seenGenerics.add(r.genericName)
+                                    } else {
+                                        Log.d("RemediumSearch", "Skipping T1A '$token' - first match was '$firstT1AToken'")
+                                    }
                                 }
                             }
                         }
@@ -160,8 +197,15 @@ class MedicineLookup(context: Context) {
                     } else {
                         val info = resolveMatch(db, fuzzyMatch, token)
                         if (info != null && info.genericName !in seenGenerics) {
-                            confirmed.add(info)
-                            seenGenerics.add(info.genericName)
+                            // ── FIRST T1A MATCH WINS ──
+                            if (firstT1AMatch == null) {
+                                firstT1AMatch = info
+                                firstT1AToken = token
+                                confirmed.add(info)
+                                seenGenerics.add(info.genericName)
+                            } else {
+                                Log.d("RemediumSearch", "Skipping fuzzy T1A '$token' - first match was '$firstT1AToken'")
+                            }
                         }
                     }
                     continue   // fuzzy hit found — skip Tier 2 for this token
@@ -169,16 +213,30 @@ class MedicineLookup(context: Context) {
 
                 // ── FALLBACK PATH: Tier 2 ← NEW ──────────────
                 // Only reached if Tier 1A exact + fuzzy both missed.
-                val t2 = lookupTier2(db, token)
-                if (t2 != null && t2.brandName !in seenTier2Brands) {
-                    tier2Results.add(t2)
-                    seenTier2Brands.add(t2.brandName)
+                // Skip Tier 2 if we already have a first T1A match - the verified drug
+                // was found, Tier 2 matches are likely excipient noise from strip packaging
+                if (firstT1AMatch != null) {
+                    Log.d("RemediumSearch", "Skipping Tier2 '$token' - T1A match already found")
+                } else {
+                    val t2 = lookupTier2(db, token)
+                    if (t2 != null && t2.brandName !in seenTier2Brands) {
+                        Log.d("RemediumSearch", "Tier2 match: token='$token' -> brand='${t2.brandName}'")
+                        tier2Results.add(t2)
+                        seenTier2Brands.add(t2.brandName)
+                    }
                 }
             }
         } catch (e: Exception) {
             Log.e("Remedium", "Search error", e)
         } finally {
             db.close()
+        }
+
+        // ── T1A SUPREMACY (final safety net): If any T1A found, discard all Tier 2 ──
+        // This handles the case where Tier 2 matches happen BEFORE T1A in token order
+        if (firstT1AMatch != null && tier2Results.isNotEmpty()) {
+            Log.i("RemediumSearch", "T1A found, discarding ${tier2Results.size} Tier2 results")
+            tier2Results.clear()
         }
 
         return SearchResult(
@@ -510,28 +568,34 @@ class MedicineLookup(context: Context) {
         matchedTerm: String
     ): MedicineInfo? {
         val drugCursor = db.rawQuery(
-            "SELECT drug_class, category, common_uses_simple, standard_adult_dose, " +
-                    "maximum_daily_dose, timing_note, timing_note_hi, alcohol_warning, " +
-                    "legal_schedule, fda_pregnancy_cat, contraindications, " +
-                    "common_side_effects, data_quality " +
+            "SELECT drug_class, category, common_uses_simple, common_uses_simple_hi, " +
+                    "standard_adult_dose, standard_adult_dose_hi, " +
+                    "maximum_daily_dose, timing_note, timing_note_hi, alcohol_warning, alcohol_warning_hi, " +
+                    "legal_schedule, fda_pregnancy_cat, contraindications, contraindications_hi, " +
+                    "common_side_effects, common_side_effects_hi, data_quality " +
                     "FROM drugs WHERE generic_name = ?",
             arrayOf(genericName)
         )
         if (!drugCursor.moveToFirst()) { drugCursor.close(); return null }
 
-        val drugClass    = drugCursor.getString(0)
-        val category     = drugCursor.getString(1)
+        val drugClass       = drugCursor.getString(0)
+        val category      = drugCursor.getString(1)
         val uses         = drugCursor.getString(2)
-        val dose         = drugCursor.getString(3)
-        val maxDose      = drugCursor.getString(4)
-        val timingNote   = drugCursor.getString(5)
-        val timingNoteHi = drugCursor.getString(6)
-        val alcoholWarning = drugCursor.getInt(7) == 1
-        val legalSchedule  = drugCursor.getString(8)
-        val fdaPregnancyCat = drugCursor.getString(9)
-        val contraindications = drugCursor.getString(10)
-        val sideEffects  = drugCursor.getString(11)
-        val drugQuality  = drugCursor.getString(12) ?: "TIER_1A_VERIFIED"
+        val usesHi       = drugCursor.getString(3)
+        val dose         = drugCursor.getString(4)
+        val doseHi       = drugCursor.getString(5)
+        val maxDose      = drugCursor.getString(6)
+        val timingNote   = drugCursor.getString(7)
+        val timingNoteHi = drugCursor.getString(8)
+        val alcoholWarning   = drugCursor.getInt(9) == 1
+        val alcoholWarningHi = drugCursor.getString(10)
+        val legalSchedule    = drugCursor.getString(11)
+        val fdaPregnancyCat  = drugCursor.getString(12)
+        val contraindications   = drugCursor.getString(13)
+        val contraindicationsHi = drugCursor.getString(14)
+        val sideEffects    = drugCursor.getString(15)
+        val sideEffectsHi  = drugCursor.getString(16)
+        val drugQuality    = drugCursor.getString(17) ?: "TIER_1A_VERIFIED"
         drugCursor.close()
 
         val effectiveQuality = combineQuality(drugQuality, brandQuality)
@@ -566,15 +630,20 @@ class MedicineLookup(context: Context) {
             drugClass     = drugClass,
             category      = category,
             uses          = uses,
+            usesHi        = usesHi,
             dose          = dose,
+            doseHi        = doseHi,
             maxDose       = maxDose,
             timingNote    = timingNote,
             timingNoteHi  = timingNoteHi,
             alcoholWarning = alcoholWarning,
+            alcoholWarningHi = alcoholWarningHi,
             legalSchedule  = legalSchedule,
             fdaPregnancyCat = fdaPregnancyCat,
             contraindications = contraindications,
+            contraindicationsHi = contraindicationsHi,
             sideEffects   = sideEffects,
+            sideEffectsHi = sideEffectsHi,
             criticalWarnings = critical,
             highWarnings  = high,
             mediumWarnings = medium,

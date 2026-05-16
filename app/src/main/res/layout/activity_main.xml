@@ -6,6 +6,7 @@
     android:id="@+id/main"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:fitsSystemWindows="true"
     tools:context=".MainActivity">
 
     <androidx.camera.view.PreviewView
@@ -17,6 +18,45 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
+    <!-- Viewfinder Overlay -->
+    <FrameLayout
+        android:id="@+id/viewfinderOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <!-- Viewfinder Rectangle - portrait orientation for strips -->
+        <View
+            android:id="@+id/viewfinderRect"
+            android:layout_width="280dp"
+            android:layout_height="440dp"
+            android:layout_gravity="center"
+            android:background="@drawable/viewfinder_border" />
+
+        <!-- Bilingual Instruction Text - below the overlay -->
+        <TextView
+            android:id="@+id/tvViewfinderHint"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal|bottom"
+            android:layout_marginBottom="160dp"
+            android:text="Hold medicine strip here\nदवा की पट्टी यहाँ रखें"
+            android:background="#80000000"
+            android:padding="8dp"
+            android:layout_marginHorizontal="24dp"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"
+            android:textAlignment="center"
+            android:shadowColor="#000000"
+            android:shadowDx="1"
+            android:shadowDy="1"
+            android:shadowRadius="3" />
+
+    </FrameLayout>
+
     <TextView
         android:id="@+id/statusText"
         android:layout_width="wrap_content"
@@ -24,11 +64,12 @@
         android:text="Starting camera..."
         android:textColor="#FFFFFF"
         android:background="#80000000"
-        android:padding="16dp"
-        android:textSize="16sp"
+        android:padding="8dp"
+        android:textSize="14sp"
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
+        android:layout_marginTop="16dp"
         android:layout_margin="24dp" />
 
     <Button
@@ -38,6 +79,8 @@
         android:text="Scan"
         android:textColor="#FFFFFF"
         android:textSize="16sp"
+        android:maxLines="1"
+        android:padding="12dp"
         android:backgroundTint="#6200EE"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintStart_toStartOf="parent"
@@ -52,6 +95,8 @@
         android:textColor="#FFFFFF"
         android:textSize="16sp"
         android:textStyle="bold"
+        android:maxLines="1"
+        android:padding="12dp"
         android:backgroundTint="#3700B3"
         app:layout_constraintBottom_toBottomOf="@id/captureButton"
         app:layout_constraintTop_toTopOf="@id/captureButton"
@@ -64,6 +109,7 @@
         android:layout_height="match_parent"
         android:background="#F5F5F5"
         android:visibility="gone"
+        android:paddingBottom="48dp"
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintStart_toStartOf="parent"
@@ -85,15 +131,16 @@
 
         <Button
             android:id="@+id/languageToggleButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
+            android:layout_width="56dp"
+            android:layout_height="48dp"
             android:text="हिं"
-            android:textSize="16sp"
+            android:textSize="14sp"
             android:textColor="#FFFFFF"
             android:backgroundTint="#3700B3"
-            android:minWidth="60dp"
-            android:layout_marginTop="12dp"
-            android:layout_marginEnd="12dp"
+            android:minWidth="56dp"
+            android:padding="8dp"
+            android:layout_marginTop="8dp"
+            android:layout_marginEnd="16dp"
             app:layout_constraintTop_toTopOf="parent"
             app:layout_constraintEnd_toEndOf="parent" />
 
@@ -102,6 +149,8 @@
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:padding="20dp"
+            android:paddingBottom="340dp"
+            android:clipToPadding="false"
             app:layout_constraintTop_toBottomOf="@id/resultTitle"
             app:layout_constraintBottom_toTopOf="@id/speakButton"
             app:layout_constraintStart_toStartOf="parent"
@@ -185,6 +234,7 @@
             android:layout_marginBottom="8dp"
             android:text="+ Add another medicine"
             android:textSize="16sp"
+            android:textColor="#FFFFFF"
             android:backgroundTint="#6200EE"
             android:visibility="gone"
             app:layout_constraintBottom_toTopOf="@id/speakButton"

@@ -13,3 +13,9 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Claude Code and agent files
+.claude/
+AGENTS.md
+CODE_REVIEW_REPORT.md
+graphify-out/
