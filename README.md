@@ -34,7 +34,7 @@ Remedium gives her a voice — literally. She points, scans, and **hears** her m
 | 🤖 Ask follow-up questions | Gemma 4 E2B on-device, grounded in DB facts |
 | ⚡ Check drug interactions | Scan two medicines → Gemma reasons about safety |
 | 🛡️ Refuse unsafe questions | 24/25 grounding score (96%) |
-| ✈️ Work offline | Zero internet for core scan, identify, chat, and TTS. Voice input uses offline pack if available. |
+| ✈️ Work offline | Zero internet for core scan, identify, chat, and TTS. Voice input uses Google Speech Services (online; offline if pack installed) |
 
 ---
 
@@ -258,6 +258,9 @@ adb push gemma-4-E2B-it.litertlm /data/local/tmp/gemma.litertlm
    ./gradlew assembleDebug
    adb install -r app/build/outputs/apk/debug/app-debug.apk
    ```
+
+### Optional: Signing a release build
+The `app/build.gradle.kts` references `remedium-release.jks` and reads passwords from environment variables `REMEDIUM_KEYSTORE_PASSWORD` and `REMEDIUM_KEY_PASSWORD`. To build your own signed release, generate your own keystore and set those variables. The committed APK in GitHub Releases is signed with the original author's keystore (kept private).
 
 ### Step 5: Use
 1. Grant camera + microphone permissions when prompted

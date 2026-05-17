@@ -48,7 +48,7 @@ class GemmaReasoner private constructor(private val context: Context) {
     private val modelPath = "/data/local/tmp/gemma.litertlm"
 
     // 35 second timeout - enough for drug interaction prompts
-    private val inferenceTimeoutMs = 35_000L
+    private val inferenceTimeoutMs = 75_000L
 
     // Flag to track timeout state
     private val timedOut = AtomicBoolean(false)
@@ -85,6 +85,25 @@ diagnose. Answer in the same language as the user's question.
 
                 isReady = true
                 Log.i(TAG, "Gemma 4 E2B loaded successfully")
+
+                // Pre-warm: run a tiny dummy inference so the first real call doesn't pay warmup tax
+                try {
+                    val warmConv = engine!!.createConversation(
+                        ConversationConfig(
+                            systemInstruction = Contents.of("Reply with just: OK"),
+                            samplerConfig = SamplerConfig(topK = 1, topP = 0.9, temperature = 0.1)
+                        )
+                    )
+                    var warmTokens = 0
+                    warmConv.sendMessageAsync("OK").collect {
+                        warmTokens++
+                        if (warmTokens >= 3) return@collect
+                    }
+                    warmConv.close()
+                    Log.i(TAG, "Engine pre-warmed successfully")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Pre-warm failed (non-fatal): ${e.message}")
+                }
 
                 withContext(Dispatchers.Main) {
                     onReady()

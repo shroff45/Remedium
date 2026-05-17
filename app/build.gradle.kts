@@ -23,9 +23,9 @@ android {
     signingConfigs {
         create("release") {
             storeFile = file("../remedium-release.jks")
-            storePassword = "remedium2026"
-            keyAlias = "remedium"
-            keyPassword = "remedium2026"
+            storePassword = System.getenv("REMEDIUM_KEYSTORE_PASSWORD") ?: ""
+            keyAlias = System.getenv("REMEDIUM_KEY_ALIAS") ?: "remedium"
+            keyPassword = System.getenv("REMEDIUM_KEY_PASSWORD") ?: ""
         }
     }
 
@@ -58,6 +58,7 @@ dependencies {
     implementation("androidx.camera:camera-view:1.6.1")
 
     implementation("com.google.mlkit:text-recognition:16.0.1")
+    implementation("com.google.mlkit:text-recognition-devanagari:16.0.1")
 
     // LiteRT-LM for Gemma 4 inference (Day 2+)
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.11.0")

@@ -40,6 +40,8 @@ import androidx.cardview.widget.CardView
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import com.google.mlkit.vision.text.devanagari.DevanagariTextRecognizerOptions
+import com.google.android.gms.tasks.Tasks
 import android.widget.EditText
 import android.widget.LinearLayout
 import kotlinx.coroutines.CoroutineScope
@@ -91,6 +93,10 @@ class MainActivity : AppCompatActivity() {
 
     // ← NEW: store last Tier 2 results for language-toggle rebuild
     private var lastTier2Results: List<Tier2Info> = emptyList()
+
+    // Interaction state — populated after checkDrugInteraction() completes
+    private var lastInteractionVerdict: String = ""
+    private var lastInteractionReason: String = ""
 
     private var camera: androidx.camera.core.Camera? = null
     private var currentZoom = 0f
@@ -152,7 +158,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         captureButton.setOnClickListener { takePhoto() }
-        scanAgainButton.setOnClickListener { hideResultPanel() }
+        scanAgainButton.setOnClickListener {
+            resetScanState()
+            hideResultPanel()
+        }
 
         languageToggleButton.setOnClickListener {
             if (currentLanguage == "en") {
@@ -369,32 +378,42 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun runOCR(bitmap: Bitmap) {
-        val recognizer  = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-        val inputImage  = InputImage.fromBitmap(bitmap, 0)
-        recognizer.process(inputImage)
-            .addOnSuccessListener { visionText ->
-                val extractedText = visionText.text
-                Log.i("RemediumOCR", "RAW OCR TEXT:\n$extractedText\n--END--")
+        val latinRecognizer     = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+        val devanagariRecognizer = TextRecognition.getClient(DevanagariTextRecognizerOptions.Builder().build())
+        val inputImage          = InputImage.fromBitmap(bitmap, 0)
+
+        // Run both recognizers in parallel, merge results
+        val latinTask      = latinRecognizer.process(inputImage)
+        val devanagariTask = devanagariRecognizer.process(inputImage)
+
+        Tasks.whenAllComplete(latinTask, devanagariTask)
+            .addOnCompleteListener { _ ->
+                val latinText      = if (latinTask.isSuccessful)      latinTask.result?.text      ?: "" else ""
+                val devanagariText = if (devanagariTask.isSuccessful) devanagariTask.result?.text ?: "" else ""
+
+                // Log both for debugging
+                Log.i("RemediumOCR", "LATIN OCR:\n$latinText\n--END--")
+                Log.i("RemediumOCR", "DEVANAGARI OCR:\n$devanagariText\n--END--")
+
+                // Merge: combine both, separated by newline, deduplicate whitespace
+                val combinedText = listOf(latinText, devanagariText)
+                    .filter { it.isNotBlank() }
+                    .joinToString("\n")
+                    .trim()
+
                 runOnUiThread {
-                    if (extractedText.isBlank()) {
+                    if (combinedText.isBlank()) {
                         statusText.text =
                             "No text detected. Try better lighting or move closer."
                         captureButton.isEnabled = true
                     } else {
-                        showResultPanel(extractedText)
+                        showResultPanel(combinedText)
                     }
                 }
+
                 bitmap.recycle()
-                recognizer.close()
-            }
-            .addOnFailureListener { e ->
-                runOnUiThread {
-                    statusText.text = "OCR failed: ${e.message}"
-                    captureButton.isEnabled = true
-                    Log.e("Remedium", "OCR error", e)
-                }
-                bitmap.recycle()
-                recognizer.close()
+                latinRecognizer.close()
+                devanagariRecognizer.close()
             }
     }
 
@@ -413,6 +432,11 @@ class MainActivity : AppCompatActivity() {
                     val secondMedicine = searchResult.confirmed.first()
                     scannedMedicines.add(secondMedicine)
                     isAddingSecondMedicine = false
+
+                    // Update lastMedicines so Speak button covers ALL scanned medicines
+                    lastMedicines = scannedMedicines.toList()
+                    lastInteractionVerdict = ""
+                    lastInteractionReason = ""
 
                     // Show result panel for viewing
                     resultPanel.visibility = View.VISIBLE
@@ -479,6 +503,25 @@ class MainActivity : AppCompatActivity() {
         viewfinderOverlay.visibility = View.VISIBLE
         statusText.text = "Camera ready. Tap Scan."
         if (::tts.isInitialized) tts.stop()
+    }
+
+    private fun resetScanState() {
+        scannedMedicines.clear()
+        lastMedicines = emptyList()
+        lastOcrText = ""
+        lastTier2Results = emptyList()
+        lastInteractionVerdict = ""
+        lastInteractionReason = ""
+        hasTier1A = false
+        isAddingSecondMedicine = false
+        btnAddMedicine.visibility = View.GONE
+        askQuestionButton.visibility = View.GONE
+        cardInteraction.visibility = View.GONE
+        tvInteractionTitle.text = ""
+        tvInteractionVerdict.text = ""
+        tvInteractionReason.text = ""
+        tvInteractionWatchFor.text = ""
+        Log.i("RemediumScan", "Scan state reset")
     }
 
     // ─────────────────────────────────────────────────────────
@@ -848,20 +891,31 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ─────────────────────────────────────────────────────────
-    // SPEAKABLE TEXT  (unchanged)
+    // SPEAKABLE TEXT
     // ─────────────────────────────────────────────────────────
 
     private fun buildSpeakableText(medicines: List<MedicineInfo>): String {
         if (medicines.isEmpty()) {
             return if (currentLanguage == "hi")
-                "\u0907\u0938 \u091B\u0935\u093F \u092E\u0947\u0902 \u0915\u094B\u0908 \u091C\u094D\u091E\u093E\u0924 \u0926\u0935\u093E \u0928\u0939\u0940\u0902 \u092E\u093F\u0932\u0940\u0964 \u0915\u0943\u092A\u092F\u093E \u0905\u092A\u0928\u0947 \u092B\u093E\u0930\u094D\u092E\u093E\u0938\u093F\u0938\u094D\u091F \u0938\u0947 \u092A\u0930\u093E\u092E\u0930\u094D\u0936 \u0915\u0930\u0947\u0902\u0964"
+                "इस छवि में कोई ज्ञात दवा नहीं मिली। कृपया अपने फार्मासिस्ट से परामर्श करें।"
             else
                 "No known medicine was found in this image. Please consult your pharmacist."
         }
         val parts = mutableListOf<String>()
-        for (med in medicines) {
+        for ((index, med) in medicines.withIndex()) {
             val template = med.category?.let { medicineLookup.getTemplate(currentLanguage, it) }
             val sb = StringBuilder()
+
+            // Prefix with ordinal when there are multiple medicines
+            if (medicines.size > 1) {
+                val ordinal = if (currentLanguage == "hi") {
+                    when (index) { 0 -> "पहली दवा: " else -> "दूसरी दवा: " }
+                } else {
+                    when (index) { 0 -> "First medicine: " else -> "Second medicine: " }
+                }
+                sb.append(ordinal)
+            }
+
             if (med.criticalWarnings.isNotEmpty()) {
                 val w    = med.criticalWarnings.first()
                 val text = pickLang(w.textEn, w.textHi)
@@ -891,7 +945,28 @@ class MainActivity : AppCompatActivity() {
             )
             parts.add(sb.toString())
         }
-        return parts.joinToString("\n\n")
+
+        val combined = parts.joinToString(". ")
+
+        // Append interaction verdict if available (the demo-critical moment)
+        if (lastInteractionVerdict.isNotBlank()) {
+            val interactionLine = if (currentLanguage == "hi") {
+                val verdictHi = when {
+                    lastInteractionVerdict.contains("SAFE", ignoreCase = true) -> "साथ लेना सुरक्षित है।"
+                    lastInteractionVerdict.contains("CONSULT", ignoreCase = true) -> "डॉक्टर से सलाह लें।"
+                    lastInteractionVerdict.contains("NO", ignoreCase = true) -> "यह संयोजन खतरनाक है। इन्हें साथ न लें।"
+                    else -> lastInteractionVerdict
+                }
+                "दोनों दवाओं का साथ लेने पर: $verdictHi" +
+                    if (lastInteractionReason.isNotBlank()) " $lastInteractionReason" else ""
+            } else {
+                "Interaction result: $lastInteractionVerdict." +
+                    if (lastInteractionReason.isNotBlank()) " $lastInteractionReason" else ""
+            }
+            return "$combined. $interactionLine"
+        }
+
+        return combined
     }
 
     // ─────────────────────────────────────────────────────────
@@ -970,7 +1045,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun checkDrugInteraction(med1: MedicineInfo, med2: MedicineInfo) {
         cardInteraction.visibility = View.VISIBLE
-        tvInteractionTitle.text = "Analysing interaction with Gemma 4..."
+        tvInteractionTitle.text = if (currentLanguage == "hi") 
+            "इंटरैक्शन की जांच हो रही है... (60 सेकंड तक लग सकते हैं)"
+        else 
+            "Analyzing interaction... (this can take up to 60 seconds)"
         tvInteractionVerdict.text = ""
         tvInteractionReason.text = ""
         tvInteractionWatchFor.text = ""
@@ -994,6 +1072,8 @@ class MainActivity : AppCompatActivity() {
                     tvInteractionTitle.text = "Interaction Check Timed Out"
                     tvInteractionReason.text = "Please check manually with a doctor."
                     layoutInteractionBg.setBackgroundColor(Color.parseColor("#FFEBEB"))
+                    lastInteractionVerdict = ""
+                    lastInteractionReason = ""
                 }
             }
         )
@@ -1010,6 +1090,10 @@ class MainActivity : AppCompatActivity() {
         tvInteractionVerdict.text = "Verdict: $verdictMatch"
         tvInteractionReason.text = "Reason: $reasonMatch"
         tvInteractionWatchFor.text = "Watch For: $watchForMatch"
+
+        // Store for TTS so Speak button can voice the interaction result
+        lastInteractionVerdict = verdictMatch
+        lastInteractionReason = reasonMatch
 
         // Dynamic Styling (The WOW factor)
         when {

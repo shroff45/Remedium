@@ -25,3 +25,8 @@ graphify-out/
 
 # Release APK (upload to GitHub Releases separately)
 remedium-v1.0.apk
+
+ 
+# JVM crash logs 
+hs_err_pid*.log 
+replay_pid*.log 
