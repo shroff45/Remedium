@@ -20,9 +20,19 @@ android {
         noCompress += "tflite"
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = file("../remedium-release.jks")
+            storePassword = "remedium2026"
+            keyAlias = "remedium"
+            keyPassword = "remedium2026"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

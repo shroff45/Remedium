@@ -19,3 +19,9 @@ local.properties
 AGENTS.md
 CODE_REVIEW_REPORT.md
 graphify-out/
+
+# Keystore files
+*.jks
+
+# Release APK (upload to GitHub Releases separately)
+remedium-v1.0.apk
