@@ -40,13 +40,13 @@ Remedium gives her a voice — literally. She points, scans, and **hears** her m
 
 ## 📱 Screenshots
 
-| Scanner | Verified (English) | Verified (Hindi) |
-|---------|-------------------|------------------|
-| ![Scanner](docs/screenshots/scanner.png) | ![Verified EN](docs/screenshots/result-verified.png) | ![Verified HI](docs/screenshots/result-hi.png) |
+| 📸 Scanner | ✅ Verified (English) | ✅ Verified (Hindi) |
+|:---:|:---:|:---:|
+| ![Camera with viewfinder overlay](docs/screenshots/scanner.png) | ![Verified medicine card in English](docs/screenshots/result-verified.png) | ![Verified medicine card in Hindi](docs/screenshots/result-hi.png) |
 
-| Drug Interaction | Safety Refusal | Unknown Medicine |
-|------------------|----------------|------------------|
-| ![Interaction](docs/screenshots/interaction.png) | ![Refusal](docs/screenshots/refusal.png) | ![Unknown](docs/screenshots/unknown.png) |
+| ⚡ Drug Interaction | 🛡️ Safety Refusal | ❓ Unknown Medicine |
+|:---:|:---:|:---:|
+| ![Drug interaction warning between two medicines](docs/screenshots/interaction.png) | ![Gemma refusing overdose request](docs/screenshots/refusal.png) | ![Not found fallback for unverified scan](docs/screenshots/unknown.png) |
 
 ---
 
@@ -198,7 +198,7 @@ Remedium/
 │   │   ├── MainActivity.kt           — Camera, OCR, result rendering
 │   │   ├── MedicineLookup.kt       — Search pipeline + fuzzy matching + T1A supremacy
 │   │   ├── DatabaseHelper.kt        — DB copy + version management (v12)
-│   │   ├── GemmaReasoner.kt         — LiteRT-LM engine, 35s timeout
+│   │   ├── GemmaReasoner.kt         — LiteRT-LM engine, 75s timeout with pre-warm
 │   │   ├── ContextAssembler.kt      — Grounded prompt builder + paed safety
 │   │   ├── AskQuestionActivity.kt   — Chat UI, voice input, TTS toggle
 │   │   └── ChatAdapter.kt           — Chat history RecyclerView
