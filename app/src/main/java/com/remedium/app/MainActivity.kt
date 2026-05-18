@@ -159,8 +159,19 @@ class MainActivity : AppCompatActivity() {
 
         captureButton.setOnClickListener { takePhoto() }
         scanAgainButton.setOnClickListener {
+            Log.i("CAMERA_DEBUG", "Scan Again tapped — calling startCamera()")
             resetScanState()
-            hideResultPanel()
+            resultPanel.visibility = View.GONE
+            cardInteraction.visibility = View.GONE
+            btnAddMedicine.visibility = View.GONE
+            cameraPreview.visibility = View.VISIBLE
+            viewfinderOverlay.visibility = View.VISIBLE
+            captureButton.isEnabled = true
+            statusText.text = "Camera ready. Tap Scan."
+            currentZoom = 0f
+            zoomButton.text = "1x"
+            camera?.cameraControl?.setLinearZoom(currentZoom)
+            if (hasCameraPermission()) startCamera() else requestCameraPermission()
         }
 
         languageToggleButton.setOnClickListener {
@@ -271,22 +282,30 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startCamera() {
+        Log.i("CAMERA_DEBUG", "startCamera() called")
+        Log.i("CAMERA_DEBUG", "cameraPreview visibility: ${cameraPreview.visibility}")
+        Log.i("CAMERA_DEBUG", "cameraPreview width: ${cameraPreview.width}, height: ${cameraPreview.height}")
+        Log.i("CAMERA_DEBUG", "Getting camera provider...")
         statusText.text = "Starting camera..."
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
         cameraProviderFuture.addListener({
             val cameraProvider = cameraProviderFuture.get()
+            Log.i("CAMERA_DEBUG", "Provider obtained, unbinding all...")
             val preview = Preview.Builder().build().also {
                 it.setSurfaceProvider(cameraPreview.surfaceProvider)
             }
+            Log.i("CAMERA_DEBUG", "Surface provider set on previewView")
             imageCapture = ImageCapture.Builder()
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
                 .setTargetRotation(cameraPreview.display.rotation)
                 .build()
             try {
                 cameraProvider.unbindAll()
+                Log.i("CAMERA_DEBUG", "Unbound. Building preview...")
                 camera = cameraProvider.bindToLifecycle(
                     this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture
                 )
+                Log.i("CAMERA_DEBUG", "bindToLifecycle SUCCESS, camera = $camera")
                 cameraPreview.setOnTouchListener { _, event ->
                     if (event.action == android.view.MotionEvent.ACTION_UP) {
                         val factory = cameraPreview.meteringPointFactory
@@ -301,6 +320,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 statusText.text = "Tap to focus \u2192 Use 1x/1.5x/2.5x for small strips \u2192 Scan."
             } catch (e: Exception) {
+                Log.e("CAMERA_DEBUG", "bindToLifecycle FAILED: ${e.message}", e)
                 statusText.text = "Camera failed: ${e.message}"
             }
         }, ContextCompat.getMainExecutor(this))
