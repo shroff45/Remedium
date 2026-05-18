@@ -52,7 +52,7 @@ Remedium gives her a voice — literally. She points, scans, and **hears** her m
 
 ## 🎬 Demo Video
 
-[Watch the 3-minute demo on YouTube]([https://youtube.com/REPLACE_WITH_YOUR_LINK](https://youtube.com/shorts/meSv-Cu-4ho?feature=share))
+[Watch the 3-minute demo on YouTube]((https://youtube.com/shorts/meSv-Cu-4ho?feature=share))
 
 ---
 
